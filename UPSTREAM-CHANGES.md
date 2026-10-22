@@ -11,7 +11,8 @@ Keep it current: whenever an original file is edited, add a row in the same chan
 
 | File | What it is |
 |---|---|
-| `crates/engine/src/cmd/spec.rs` | Spec commands `spec.tag`, `spec.list`, `spec.set`, and their tests |
+| `crates/engine/src/cmd/spec.rs` | Spec commands `spec.tag`, `spec.list`, `spec.set`, and their tests (M1) |
+| `crates/engine/src/cmd/spec/sections.rs` | Section paragraphs (M2): `spec.import`, `spec.activate`, `spec.deactivate`, `spec.printable`, kinds and levels from styles, the on/off state (custom property `Speccraft.On`), the parent rule, and their tests. A child module of `spec.rs`, so it needs no registry line of its own |
 | `UPSTREAM-CHANGES.md` | This list |
 
 ## Original files edited
@@ -26,3 +27,10 @@ Keep it current: whenever an original file is edited, add a row in the same chan
 1. Fetch the new version and merge it.
 2. If git reports a conflict, it will be in one of the two files above; keep both sides' changes.
 3. Run `cargo xtask ci` (the project's own full check) and make sure the spec tests still pass.
+
+## Known issues (upstream, not caused by Speccraft)
+
+- `inline_box_that_resizes_to_fit_takes_its_texts_height` (`crates/layout/src/tests_textbox.rs`)
+  fails on Windows: it counts pages, and line heights depend on the installed fonts. The `layout`
+  crate doesn't use any Speccraft code. `cargo xtask ci` stops at it, so run
+  `cargo xtask assets`, `cargo xtask layers` and `cargo xtask wasm` separately afterwards.

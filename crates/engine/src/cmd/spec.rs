@@ -14,6 +14,8 @@ use wordcraft_doc::{Document, Pos, StoryRef};
 use super::{controls, pos_json};
 use crate::{CmdError, CmdResult, CommandSpec, Selection, Session, p};
 
+mod sections;
+
 const LOC: &str = "Specs › Items";
 /// The start of the tag of every spec item's content control.
 pub const TAG_PREFIX: &str = "spec:";
@@ -27,16 +29,23 @@ const MAX_TEXT: usize = 20_000;
 const MAX_ITEMS: usize = 10_000;
 
 pub fn specs() -> Vec<CommandSpec> {
-    vec![
+    let mut v = vec![
         CommandSpec::new("spec.tag", "Tag as Spec Item", LOC, tag).params(r#"{"id": string, "title"?: string}"#),
         CommandSpec::new("spec.list", "List Spec Items", LOC, list).pure(),
         CommandSpec::new("spec.set", "Set Spec Item Text", LOC, set).params(r#"{"id": string, "text": string}"#),
-    ]
+    ];
+    v.extend(sections::specs());
+    v
 }
 
 /// The `id` param: 1 to 64 letters, digits, `.`, `_` or `-`.
 fn id_param(v: &Value) -> Result<String, CmdError> {
-    let id = p::req_str(v, "id")?.trim();
+    check_id(p::req_str(v, "id")?)
+}
+
+/// An item id: 1 to 64 letters, digits, `.`, `_` or `-`.
+fn check_id(id: &str) -> Result<String, CmdError> {
+    let id = id.trim();
     let ok = !id.is_empty() && id.chars().count() <= MAX_ID && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
     if ok { Ok(id.to_string()) } else { Err(CmdError::Params("`id` must be 1 to 64 letters, digits, '.', '_' or '-'".into())) }
 }
@@ -80,13 +89,20 @@ fn tag(s: &mut Session, v: &Value) -> CmdResult {
     Ok(json!({"id": id}))
 }
 
-/// All spec items: id, title, text and where they are.
+/// All spec items: id, title, text and where they are; section paragraphs (see [`sections`])
+/// also give their kind, level, state and parent.
 fn list(s: &mut Session, _v: &Value) -> CmdResult {
+    let section = sections::list_fields(&s.doc);
     let rows: Vec<Value> = items(&s.doc)
         .into_iter()
         .map(|(id, r)| {
             let text = if r.control.showing_placeholder { String::new() } else { s.doc.control_text(&r) };
-            json!({"id": id, "title": r.control.title, "text": text, "block": r.control.block, "start": pos_json(&r.start), "end": pos_json(&r.end)})
+            let mut row =
+                json!({"id": id, "title": r.control.title, "text": text, "block": r.control.block, "start": pos_json(&r.start), "end": pos_json(&r.end)});
+            if let (Some(row), Some(Value::Object(extra))) = (row.as_object_mut(), section.get(&id)) {
+                row.extend(extra.clone());
+            }
+            row
         })
         .collect();
     Ok(json!({"count": rows.len(), "items": rows}))
