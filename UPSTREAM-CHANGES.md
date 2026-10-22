@@ -13,6 +13,7 @@ Keep it current: whenever an original file is edited, add a row in the same chan
 |---|---|
 | `crates/engine/src/cmd/spec.rs` | Spec commands `spec.tag`, `spec.list`, `spec.set`, and their tests (M1) |
 | `crates/engine/src/cmd/spec/sections.rs` | Section paragraphs (M2): `spec.import`, `spec.activate`, `spec.deactivate`, `spec.printable`, kinds and levels from styles, the on/off state (custom property `Speccraft.On`), the parent rule, and their tests. A child module of `spec.rs`, so it needs no registry line of its own |
+| `crates/engine/src/cmd/spec/output.rs` | PDF output (M3): `spec.exportPdf` writes a PDF of exactly the paragraphs that print, from a cleaned copy of the document through WordCraft's own PDF export and safe file write; and its tests. Also a child module of `spec.rs` |
 | `UPSTREAM-CHANGES.md` | This list |
 
 ## Original files edited
@@ -40,7 +41,7 @@ steps. Run `cargo test --workspace --no-fail-fast` to see every failure, then `c
   wants every command label and ribbon location translated into all 22 interface languages, and the
   Speccraft labels are English only ("Specs", "Items", "Tag as Spec Item", "List Spec
   Items", "Set Spec Item Text", "Import Section Paragraphs", "Switch Paragraph On", "Switch
-  Paragraph Off", "List Printable Paragraphs"). Effect: in a non-English interface these commands
+  Paragraph Off", "List Printable Paragraphs", "Export Printable PDF"). Effect: in a non-English interface these commands
   show in English. To fix later: add translations, ideally in one new Speccraft file with a small
   hook in `crates/ui-egui/src/i18n/mod.rs` (log that edit in the table above) rather than editing
   the 22 `.tsv` files.
