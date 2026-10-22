@@ -36,6 +36,7 @@ pub mod protect;
 pub mod references;
 pub mod review;
 pub mod smart_art;
+pub mod spec;
 pub mod speech;
 pub mod table;
 pub mod table_draw;
@@ -100,6 +101,7 @@ pub fn registry() -> Registry {
     v.extend(protect::specs());
     v.extend(speech::specs());
     v.extend(controls::specs());
+    v.extend(spec::specs());
     Registry::new(v)
 }
 
