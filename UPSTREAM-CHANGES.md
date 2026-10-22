@@ -28,9 +28,29 @@ Keep it current: whenever an original file is edited, add a row in the same chan
 2. If git reports a conflict, it will be in one of the two files above; keep both sides' changes.
 3. Run `cargo xtask ci` (the project's own full check) and make sure the spec tests still pass.
 
-## Known issues (upstream, not caused by Speccraft)
+## Known issues
 
-- `inline_box_that_resizes_to_fit_takes_its_texts_height` (`crates/layout/src/tests_textbox.rs`)
-  fails on Windows: it counts pages, and line heights depend on the installed fonts. The `layout`
-  crate doesn't use any Speccraft code. `cargo xtask ci` stops at it, so run
-  `cargo xtask assets`, `cargo xtask layers` and `cargo xtask wasm` separately afterwards.
+`cargo xtask ci` stops at the first failing test, so on this machine it never reaches the later
+steps. Run `cargo test --workspace --no-fail-fast` to see every failure, then `cargo xtask assets`,
+`cargo xtask layers` and `cargo xtask wasm` separately. Only the failures below are expected.
+
+### Caused by Speccraft (left failing on purpose for now)
+
+- `every_tab_and_command_is_translated` (`crates/ui-egui/src/i18n/tests.rs`) fails: WordCraft
+  wants every command label and ribbon location translated into all 22 interface languages, and the
+  Speccraft labels are English only ("Specs", "Items", "Tag as Spec Item", "List Spec
+  Items", "Set Spec Item Text", "Import Section Paragraphs", "Switch Paragraph On", "Switch
+  Paragraph Off", "List Printable Paragraphs"). Effect: in a non-English interface these commands
+  show in English. To fix later: add translations, ideally in one new Speccraft file with a small
+  hook in `crates/ui-egui/src/i18n/mod.rs` (log that edit in the table above) rather than editing
+  the 22 `.tsv` files.
+
+### Upstream, not caused by Speccraft (font-dependent, fail on Windows)
+
+- `inline_box_that_resizes_to_fit_takes_its_texts_height` (`crates/layout/src/tests_textbox.rs`):
+  it counts pages, and line heights depend on the installed fonts.
+- `emoji_are_drawn_in_colour`, `emoji_keep_their_colours_on_a_dark_page` and
+  `emoji_with_text_effects_stay_drawn` (`crates/render/src/tests_color_glyphs.rs`): they expect a
+  particular colour emoji font.
+
+Neither the `layout` nor the `render` crate uses any Speccraft code.
