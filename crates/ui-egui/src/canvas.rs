@@ -1620,6 +1620,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 }
             }
         }
+        // Speccraft fork: spec paragraph marks in the margin.
+        crate::speccraft::marks::paint(app, ui, &painter, &rects, &layout, geo.scale);
         // Selection (a selected object shows its frame instead): whole table cells shade the
         // cells (an empty one too), a column selection each row's piece, text running into or
         // across a table the whole cells of the rows it takes.

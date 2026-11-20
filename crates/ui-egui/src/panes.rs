@@ -64,6 +64,8 @@ pub enum Pane {
     Comments,
     /// Speccraft fork: the open project's sections.
     Sections,
+    /// Speccraft fork: the section's paragraphs and how they print.
+    SpecOutline,
 }
 
 impl Pane {
@@ -81,6 +83,7 @@ impl Pane {
             Self::Proofing => "Proofing",
             Self::Comments => "Comments",
             Self::Sections => "Sections",
+            Self::SpecOutline => "Spec Outline",
         }
     }
 
@@ -98,6 +101,7 @@ impl Pane {
             Self::Proofing => (Edge::End, 400.0),
             Self::Comments => (Edge::End, 290.0),
             Self::Sections => (Edge::Start, 280.0),
+            Self::SpecOutline => (Edge::End, 320.0),
         };
         PaneState::docked(edge, width)
     }
@@ -117,10 +121,11 @@ impl Pane {
             Self::Proofing => "proofing",
             Self::Comments => "comments",
             Self::Sections => "sections",
+            Self::SpecOutline => "specOutline",
         }
     }
 
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::SmartArtText,
         Self::Navigation,
         Self::Clipboard,
@@ -133,6 +138,7 @@ impl Pane {
         Self::Proofing,
         Self::Comments,
         Self::Sections,
+        Self::SpecOutline,
     ];
 
     fn from_key(key: &str) -> Option<Self> {
@@ -151,7 +157,7 @@ impl Pane {
             Self::AltText => Some("view.altTextPane"),
             Self::FormatShape => Some("view.formatShapePane"),
             Self::Comments => Some("view.commentsPane"),
-            Self::RestrictEditing | Self::Proofing | Self::Sections => None,
+            Self::RestrictEditing | Self::Proofing | Self::Sections | Self::SpecOutline => None,
         }
     }
 }
@@ -178,6 +184,7 @@ impl PaneContent<Pane> for Content<'_> {
             Pane::Proofing => crate::proofing_pane::show(app, ui),
             Pane::Comments => comments(app, ui),
             Pane::Sections => crate::speccraft::pane(app, ui),
+            Pane::SpecOutline => crate::speccraft::outline::pane(app, ui),
         })
     }
 

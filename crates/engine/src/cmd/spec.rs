@@ -14,9 +14,9 @@ use wordcraft_doc::{Document, Pos, StoryRef};
 use super::{controls, pos_json};
 use crate::{CmdError, CmdResult, CommandSpec, Selection, Session, p};
 
-mod output;
+pub mod output;
 pub mod project;
-mod sections;
+pub mod sections;
 
 const LOC: &str = "Specs › Items";
 /// The start of the tag of every spec item's content control.

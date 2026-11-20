@@ -12,10 +12,11 @@ Keep it current: whenever an original file is edited, add a row in the same chan
 | File | What it is |
 |---|---|
 | `crates/engine/src/cmd/spec.rs` | Spec commands `spec.tag`, `spec.list`, `spec.set`, and their tests (M1) |
-| `crates/engine/src/cmd/spec/sections.rs` | Section paragraphs (M2): `spec.import`, `spec.activate`, `spec.deactivate`, `spec.printable`, kinds and levels from styles, the on/off state (custom property `Speccraft.On`), the parent rule, and their tests. A child module of `spec.rs`, so it needs no registry line of its own |
+| `crates/engine/src/cmd/spec/sections.rs` | Section paragraphs (M2): `spec.import`, `spec.activate`, `spec.deactivate`, `spec.printable`; M5: `spec.toggle` (Mod+Alt+J; refused state kept in `Speccraft.Refused`) and `spec.outline`; kinds and levels from styles, the on/off state (custom property `Speccraft.On`), the parent rule, and their tests. A child module of `spec.rs`, so it needs no registry line of its own |
 | `crates/engine/src/cmd/spec/output.rs` | PDF output (M3): `spec.exportPdf` writes a PDF of exactly the paragraphs that print, from a cleaned copy of the document through WordCraft's own PDF export and safe file write; and its tests. Also a child module of `spec.rs` |
 | `crates/engine/src/cmd/spec/project.rs` | Project file (M4): `spec.project.new/info/set/addSection/removeSection/include/order/requires/validate/publish`; the `.speccraft` JSON format; copying a master into the project (records `Speccraft.Role`, `Speccraft.Master` and `Speccraft.Baseline` in the copy); placeholder filling used by `spec.exportPdf`; and its tests. A child module of `spec.rs` |
-| `crates/ui-egui/src/speccraft.rs` | The Specs ribbon tab and the Sections pane (M4): `ui.spec.*` commands (open/new/close project, add section from a master, open a section in the same window after saving the one on screen, include, move, remove, check, publish), and their tests |
+| `crates/ui-egui/src/speccraft/marks.rs`, `crates/ui-egui/src/speccraft/outline.rs` | M5: spec marks in the page margin (state colours, a wash over what won't print, click to switch) and the Spec Outline pane (tree with filter and search, details of the paragraph at the caret, Printed view of the pages as they publish) |
+| `crates/ui-egui/src/speccraft.rs` | The Specs ribbon tab and the Sections pane (M4; project information editor added in M5): `ui.spec.*` commands (open/new/close project, add section from a master, open a section in the same window after saving the one on screen, include, move, remove, check, publish), and their tests |
 | `speccraft/tests/` | Test master sections (original wording), the M3 PDF regression check `check_pdfs.py` and its expected text, and a tool to rebuild a guide spec PDF as a .docx for local tests. Python; see its README |
 | `UPSTREAM-CHANGES.md` | This list |
 
@@ -31,9 +32,10 @@ Keep it current: whenever an original file is edited, add a row in the same chan
 | `crates/ui-egui/src/app.rs` | `speccraft: Default::default(),` in `WordApp::new` | Initialises that field |
 | `crates/ui-egui/src/window_ui.rs` | `speccraft: _,` under "App-wide" in `swap_window` | WordCraft makes every `WordApp` field say whether it is app-wide or per window; the open project is app-wide |
 | `crates/ui-egui/src/app/commands.rs` | 4 lines at the top of `ui_command`: `ui.spec.*` goes to `crate::speccraft::command` | Registers the Specs UI commands |
-| `crates/ui-egui/src/panes.rs` | `Pane::Sections` and its arm in each match (title, default place: left, 280 pt; key `sections`; `ALL` 11 → 12; no close command; body) | The Sections pane |
-| `crates/ui-egui/src/panes/state.rs` | `(Pane::Sections, app.speccraft.pane_open)` in `open` | When the Sections pane shows |
-| `crates/ui-egui/src/panes/host.rs` | One arm in `close`: `Pane::Sections` sets `app.speccraft.pane_open = false` | Closing the pane from its title bar |
+| `crates/ui-egui/src/panes.rs` | `Pane::Sections` and `Pane::SpecOutline` and their arms in each match (title; default place: Sections left 280 pt, Spec Outline right 320 pt; keys `sections`, `specOutline`; `ALL` 11 → 13; no close command; body) | The Sections and Spec Outline panes |
+| `crates/ui-egui/src/panes/state.rs` | `(Pane::Sections, app.speccraft.pane_open)` and `(Pane::SpecOutline, app.speccraft.outline_open)` in `open` | When the panes show |
+| `crates/ui-egui/src/panes/host.rs` | Two arms in `close` (`Pane::Sections`, `Pane::SpecOutline`) | Closing the panes from their title bars |
+| `crates/ui-egui/src/canvas.rs` | 2 lines after the reading highlight in `show`: `crate::speccraft::marks::paint(…)` | Draws the spec marks over the pages |
 | `crates/ui-egui/src/file_dialogs.rs` | One arm in `open_filters`: `"speccraft"` (Speccraft projects, All files) | Open Project's file filter |
 | `crates/engine/src/io.rs` | Added `create_dir_all` (checked against the automation write root, like `write_file`), with a web stub (13 lines, after `list_dir`) | `spec.project.publish` creates its Published folder; commands may only reach the disk through `io` (`file_access::tests::commands_do_not_touch_the_file_system_themselves`) |
 | `crates/engine/src/cmd/controls.rs` | `fn insert` became `pub(crate) fn insert` (1 word) | Lets the spec commands reuse the content control insert code |

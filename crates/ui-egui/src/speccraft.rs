@@ -17,6 +17,9 @@ use crate::file_dialogs::{AfterPick, FileDialogRequest};
 use crate::theme::{Tokens, regular, semibold};
 use crate::widgets::{big, big_toggle, group};
 
+pub(crate) mod marks;
+pub(crate) mod outline;
+
 /// What the Specs tab and Sections pane keep between frames.
 #[derive(Default)]
 pub struct SpecUi {
@@ -30,6 +33,31 @@ pub struct SpecUi {
     pub findings: Option<Value>,
     /// A file dialog asked for by the pane, waiting for its answer.
     waiting: Option<Pick>,
+    /// The Spec Outline pane is open.
+    pub outline_open: bool,
+    /// The page's spec marks are hidden (Specs › Show Marks off).
+    pub hide_marks: bool,
+    /// The Spec Outline pane's filter, search text and view.
+    pub(crate) filter: outline::Filter,
+    pub(crate) search: String,
+    pub(crate) view: outline::View,
+    /// Caches: the page's marks, `spec.outline`, and the Printed view's pages.
+    pub(crate) marks_cache: Option<marks::MarksCache>,
+    pub(crate) outline_cache: Option<((u64, u64), Value)>,
+    pub(crate) printed: Option<outline::Printed>,
+    /// The project information being edited in the Sections pane.
+    info_form: Option<InfoForm>,
+}
+
+/// Project information as typed in the Sections pane, before it is saved.
+#[derive(Clone, Default)]
+struct InfoForm {
+    name: String,
+    number: String,
+    issue: String,
+    date: String,
+    /// Named values: (name, value).
+    values: Vec<(String, String)>,
 }
 
 /// What a file dialog the pane asked for is for.
@@ -50,6 +78,18 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
         "ui.spec.sectionsPane" => {
             app.speccraft.pane_open = p.get("value").and_then(Value::as_bool).unwrap_or(!app.speccraft.pane_open);
             Ok(json!({"open": app.speccraft.pane_open}))
+        }
+        "ui.spec.outlinePane" => {
+            app.speccraft.outline_open = p.get("value").and_then(Value::as_bool).unwrap_or(!app.speccraft.outline_open);
+            if let Some(v) = s("view") {
+                app.speccraft.view = if v == "printed" { outline::View::Printed } else { outline::View::Outline };
+            }
+            Ok(json!({"open": app.speccraft.outline_open}))
+        }
+        "ui.spec.marks" => {
+            let show = p.get("value").and_then(Value::as_bool).unwrap_or(app.speccraft.hide_marks);
+            app.speccraft.hide_marks = !show;
+            Ok(json!({"shown": show}))
         }
         "ui.spec.openProject" => match s("path") {
             Some(path) => open_project(app, PathBuf::from(path)),
@@ -252,6 +292,12 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
     });
     group(ui, "Section", None, app, |ui, app| {
         big(ui, app, "multilevel", "Import\nParagraphs", "spec.import", json!({}), false);
+        big(ui, app, "check", "Switch\nOn / Off", "spec.toggle", json!({}), false);
+        let open = app.speccraft.outline_open;
+        big_toggle(ui, app, "outline", "Outline\nPane", "ui.spec.outlinePane", open);
+        let shown = !app.speccraft.hide_marks;
+        big_toggle(ui, app, "pilcrow", "Show\nMarks", "ui.spec.marks", shown);
+        big(ui, app, "readMode", "Printed\nView", "ui.spec.outlinePane", json!({"value": true, "view": "printed"}), false);
         big(ui, app, "export", "Export\nPDF", "spec.exportPdf", json!({}), false);
     });
 }
@@ -327,6 +373,7 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     if !sub.is_empty() {
         ui.label(RichText::new(sub.join(" · ")).small().color(t.text_dim));
     }
+    project_info(app, ui, &info);
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         if ui.small_button(tl!("Add Section…")).clicked() {
@@ -429,6 +476,88 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     }
 }
 
+/// Project information and named values, editable in place. Values fill placeholders such as
+/// `<Insert Architect Name>` when sections publish.
+fn project_info(app: &mut WordApp, ui: &mut Ui, info: &Value) {
+    let t = Tokens::get(ui.ctx());
+    let header = egui::CollapsingHeader::new(RichText::new(tl!("Project Information")).small()).id_salt("spec_project_info").default_open(false);
+    let shown = header.show(ui, |ui| {
+        if app.speccraft.info_form.is_none() {
+            let f = |k: &str| info.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+            let values = info
+                .get("values")
+                .and_then(Value::as_object)
+                .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect())
+                .unwrap_or_default();
+            app.speccraft.info_form = Some(InfoForm { name: f("name"), number: f("number"), issue: f("issue"), date: f("date"), values });
+        }
+        let Some(form) = app.speccraft.info_form.as_mut() else { return };
+        egui::Grid::new("spec_info_grid").num_columns(2).spacing([6.0, 4.0]).show(ui, |ui| {
+            for (label, field) in [("Name", &mut form.name), ("Number", &mut form.number), ("Issue", &mut form.issue), ("Date", &mut form.date)] {
+                ui.label(RichText::new(tl!(label)).small());
+                ui.add(egui::TextEdit::singleline(field).desired_width(160.0));
+                ui.end_row();
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(RichText::new(tl!("Values for placeholders such as <Insert Architect Name>")).small().color(t.text_dim));
+        let mut remove = None;
+        for (i, (k, v)) in form.values.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(k).hint_text(tl!("Name")).desired_width(90.0));
+                ui.add(egui::TextEdit::singleline(v).hint_text(tl!("Value")).desired_width(90.0));
+                if ui.small_button("×").on_hover_text(tl!("Remove")).clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            form.values.remove(i);
+        }
+        let mut save = false;
+        ui.horizontal(|ui| {
+            if ui.small_button(tl!("Add Value")).clicked() {
+                form.values.push((String::new(), String::new()));
+            }
+            save = ui.small_button(tl!("Save")).clicked();
+        });
+        if save {
+            let form = form.clone();
+            if let Err(e) = save_info(app, info, &form) {
+                app.status(e);
+            }
+        }
+    });
+    if shown.body_returned.is_none() {
+        // Closed: show the saved values next time it opens.
+        app.speccraft.info_form = None;
+    }
+}
+
+/// Save the project information form: fields, and named values (dropped names removed).
+fn save_info(app: &mut WordApp, info: &Value, form: &InfoForm) -> Result<Value, String> {
+    let path = project_path(app)?;
+    let mut values = serde_json::Map::new();
+    if let Some(old) = info.get("values").and_then(Value::as_object) {
+        for k in old.keys() {
+            values.insert(k.clone(), Value::Null);
+        }
+    }
+    for (k, v) in &form.values {
+        if !k.trim().is_empty() {
+            values.insert(k.trim().to_string(), json!(v));
+        }
+    }
+    let r = app.run(
+        "spec.project.set",
+        json!({"path": path, "name": form.name, "number": form.number, "issue": form.issue, "date": form.date, "values": values}),
+    )?;
+    app.speccraft.info = Some(r.clone());
+    app.speccraft.info_form = None;
+    app.status(tl!("Project information saved"));
+    Ok(r)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -517,6 +646,104 @@ mod tests {
         draw(&mut a);
         a.run("ui.spec.closeProject", json!({})).unwrap();
         assert!(a.speccraft.project.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A section with a Part, an Article, a paragraph under it and a note, imported.
+    fn imported_app() -> WordApp {
+        use std::sync::Arc;
+        let para = |style: &str, text: &str| {
+            Arc::new(wordcraft_doc::Block::Para(wordcraft_doc::Paragraph::with_text(text, Default::default()).styled(style)))
+        };
+        let mut d = wordcraft_doc::Document::new();
+        d.body = vec![
+            para("SCT", "SECTION 09 2900 - GYPSUM BOARD"),
+            para("PRT", "GENERAL"),
+            para("ART", "SUMMARY"),
+            para("CMT", "Retain this article."),
+            para("PR1", "Section includes gypsum board."),
+            para("EOS", "END OF SECTION 09 2900"),
+        ];
+        let mut a = WordApp::new(Session::new(d), Services::default());
+        a.run("spec.import", json!({})).unwrap();
+        a
+    }
+
+    #[test]
+    fn the_outline_pane_lists_filters_and_switches_paragraphs() {
+        let mut a = imported_app();
+        a.run("ui.spec.outlinePane", json!({"value": true})).unwrap();
+        assert!(crate::panes::open(&a).contains(&crate::panes::Pane::SpecOutline));
+        let o = outline::outline(&mut a);
+        assert_eq!(o["items"].as_array().unwrap().len(), 6);
+        // Switching the paragraph under an off Article marks it refused, then the chain brings it on.
+        assert_eq!(a.run("spec.toggle", json!({"id": "p0005"})).unwrap()["state"], "refused");
+        a.run("spec.activate", json!({"ids": ["p0002", "p0003"]})).unwrap();
+        let o = outline::outline(&mut a);
+        let state = |id: &str| o["items"].as_array().unwrap().iter().find(|i| i["id"] == id).unwrap()["state"].clone();
+        assert_eq!(state("p0005"), "on");
+        assert_eq!(state("p0004"), "note");
+
+        // The pane draws in both views, filtered and searched; the Printed view renders pages.
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        for (view, filter, search) in [
+            (outline::View::Outline, outline::Filter::All, ""),
+            (outline::View::Outline, outline::Filter::Notes, "retain"),
+            (outline::View::Printed, outline::Filter::All, ""),
+        ] {
+            a.speccraft.view = view;
+            a.speccraft.filter = filter;
+            a.speccraft.search = search.into();
+            let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                egui::Panel::right("outline_test").default_size(320.0).show(ui, |ui| outline::pane(&mut a, ui));
+            });
+            out.drop_without_applying_deltas();
+        }
+        let printed = a.speccraft.printed.as_ref().unwrap();
+        assert_eq!(printed.pages.len(), 1, "{:?}", printed.note);
+    }
+
+    #[test]
+    fn marks_are_found_for_every_paragraph_and_can_be_hidden() {
+        let mut a = imported_app();
+        let layout = a.session.layout();
+        let marks = marks::marked(&mut a, &layout);
+        assert_eq!(marks.len(), 6);
+        assert!(marks.iter().all(|m| !m.pieces.is_empty()), "each paragraph is on a page");
+        // Cached until the document changes.
+        assert!(std::sync::Arc::ptr_eq(&marks, &marks::marked(&mut a, &layout)));
+        a.run("spec.toggle", json!({"id": "p0002"})).unwrap();
+        let layout = a.session.layout();
+        let again = marks::marked(&mut a, &layout);
+        assert!(!std::sync::Arc::ptr_eq(&marks, &again));
+        assert_eq!(again.iter().find(|m| m.id == "p0002").unwrap().state, wordcraft_engine::cmd::spec::sections::State::On);
+        assert_eq!(a.run("ui.spec.marks", json!({"value": false})).unwrap()["shown"], false);
+        assert!(a.speccraft.hide_marks);
+        assert_eq!(a.run("ui.spec.marks", json!({})).unwrap()["shown"], true);
+    }
+
+    #[test]
+    fn project_information_is_saved_with_its_values() {
+        let dir = scratch("info");
+        let mut a = app();
+        let project = dir.join("P.speccraft");
+        a.run("ui.spec.newProject", json!({"path": project.to_string_lossy()})).unwrap();
+        let info = a.speccraft.info.clone().unwrap();
+        let form = InfoForm {
+            name: "Riverside Library".into(),
+            number: "2026-14".into(),
+            issue: "Issued for Bid".into(),
+            date: "December 1, 2026".into(),
+            values: vec![("Architect Name".into(), "Studio North".into())],
+        };
+        save_info(&mut a, &info, &form).unwrap();
+        let info = a.speccraft.info.clone().unwrap();
+        assert_eq!((info["name"].clone(), info["values"]["Architect Name"].clone()), (json!("Riverside Library"), json!("Studio North")));
+        // A value dropped from the form is removed from the project.
+        let form = InfoForm { values: vec![], ..form };
+        save_info(&mut a, &info, &form).unwrap();
+        assert_eq!(a.speccraft.info.as_ref().unwrap()["values"], json!({}));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

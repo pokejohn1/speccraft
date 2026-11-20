@@ -25,6 +25,11 @@ const IDS: &str = r#"{"id": string} | {"ids": [string]}"#;
 pub const NOTE_PREFIX: &str = "//";
 /// The custom document property holding the ids of the items that are on.
 pub const STATE_PROP: &str = "Speccraft.On";
+/// Document property: ids the author tried to switch on while their parent was off (SpecLink's
+/// "refused" state). They come on by themselves once their parent prints.
+pub const REFUSED_PROP: &str = "Speccraft.Refused";
+/// Characters of a paragraph's text `spec.outline` returns.
+const OUTLINE_TEXT: usize = 160;
 /// Longest state property read, in bytes: every item's id at its longest, plus the commas.
 const MAX_STATE: usize = MAX_ITEMS * (MAX_ID + 1);
 /// Characters of a paragraph's text shown with a warning.
@@ -38,6 +43,10 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("spec.activate", "Switch Paragraph On", LOC, activate).params(IDS),
         CommandSpec::new("spec.deactivate", "Switch Paragraph Off", LOC, deactivate).params(IDS),
         CommandSpec::new("spec.printable", "List Printable Paragraphs", LOC, printable_cmd).pure(),
+        CommandSpec::new("spec.toggle", "Switch Paragraph On or Off", LOC, toggle)
+            .key("Mod+Alt+J")
+            .params(r#"{"id"?: string (default: the paragraph at the caret)}"#),
+        CommandSpec::new("spec.outline", "Spec Outline", LOC, outline_cmd).pure(),
     ]
 }
 
@@ -180,6 +189,97 @@ fn write_state(doc: &mut Document, entries: &[Entry], on: &[bool]) {
     }
 }
 
+/// The ids the refused property names.
+fn stored_refused(doc: &Document) -> HashSet<String> {
+    let v = doc.custom_prop(REFUSED_PROP).unwrap_or("");
+    let end = (0..=v.len().min(MAX_STATE)).rev().find(|i| v.is_char_boundary(*i)).unwrap_or(0);
+    v.get(..end).unwrap_or("").split(',').map(str::trim).filter(|id| !id.is_empty()).take(MAX_ITEMS).map(str::to_string).collect()
+}
+
+/// Write the refused property: the refused ids that are still section paragraphs and off, in
+/// document order.
+fn write_refused(doc: &mut Document, entries: &[Entry], on: &[bool], refused: &HashSet<String>) {
+    let mut seen = HashSet::new();
+    let ids: Vec<&str> = entries
+        .iter()
+        .zip(on)
+        .filter(|(e, on)| !**on && e.kind != Kind::Note && refused.contains(&e.id) && seen.insert(e.id.as_str()))
+        .map(|(e, _)| e.id.as_str())
+        .collect();
+    if ids.is_empty() {
+        doc.remove_custom_prop(REFUSED_PROP);
+    } else {
+        doc.set_custom_prop(REFUSED_PROP, &ids.join(","));
+    }
+}
+
+/// Switch on refused items whose parent now prints (parents first, so chains come on in one
+/// pass) and take them off the refused list.
+fn release_refused(entries: &[Entry], on: &mut [bool], refused: &mut HashSet<String>) {
+    for (i, e) in entries.iter().enumerate() {
+        if !refused.contains(&e.id) || e.kind == Kind::Note {
+            continue;
+        }
+        let parent_prints = e.parent.is_none_or(|p| on.get(p).copied().unwrap_or(false));
+        if parent_prints {
+            if let Some(x) = on.get_mut(i) {
+                *x = true;
+            }
+            refused.remove(&e.id);
+        }
+    }
+}
+
+/// How a section paragraph shows: printing, off, refused (wanted, but its parent is off), or a note.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    On,
+    Off,
+    Refused,
+    Note,
+}
+
+impl State {
+    pub fn name(self) -> &'static str {
+        match self {
+            State::On => "on",
+            State::Off => "off",
+            State::Refused => "refused",
+            State::Note => "note",
+        }
+    }
+}
+
+/// Every section paragraph with how it shows.
+pub fn states(doc: &Document) -> Vec<(Entry, State)> {
+    let refused = stored_refused(doc);
+    outline(doc)
+        .into_iter()
+        .map(|e| {
+            let st = if e.kind == Kind::Note {
+                State::Note
+            } else if e.on {
+                State::On
+            } else if refused.contains(&e.id) {
+                State::Refused
+            } else {
+                State::Off
+            };
+            (e, st)
+        })
+        .collect()
+}
+
+/// The section paragraph the caret is in (body only).
+pub fn at_caret(s: &Session, entries: &[Entry]) -> Option<usize> {
+    let f = &s.sel.focus;
+    if f.story != StoryRef::Body {
+        return None;
+    }
+    let block = *f.path.0.first()?;
+    entries.iter().position(|e| e.range.start.path.0.first() == Some(&block))
+}
+
 /// The section paragraph index of each `id` / `ids` param, in document order, once each.
 fn targets(v: &Value, entries: &[Entry]) -> Result<Vec<usize>, CmdError> {
     let mut ids = Vec::new();
@@ -239,7 +339,10 @@ fn activate(s: &mut Session, v: &Value) -> CmdResult {
             *x = true;
         }
     }
+    let mut refused = stored_refused(&s.doc);
+    release_refused(&entries, &mut on, &mut refused);
     write_state(&mut s.doc, &entries, &on);
+    write_refused(&mut s.doc, &entries, &on, &refused);
     Ok(change_result(&entries, &on))
 }
 
@@ -247,14 +350,75 @@ fn activate(s: &mut Session, v: &Value) -> CmdResult {
 fn deactivate(s: &mut Session, v: &Value) -> CmdResult {
     let entries = outline(&s.doc);
     let mut on: Vec<bool> = entries.iter().map(|e| e.on).collect();
+    let mut refused = stored_refused(&s.doc);
     for i in targets(v, &entries)? {
         if let Some(x) = on.get_mut(i) {
             *x = false;
         }
+        if let Some(e) = entries.get(i) {
+            refused.remove(&e.id);
+        }
     }
     settle(&entries, &mut on);
     write_state(&mut s.doc, &entries, &on);
+    write_refused(&mut s.doc, &entries, &on, &refused);
     Ok(change_result(&entries, &on))
+}
+
+/// Switch one paragraph (`id`, or the one at the caret) on or off. A paragraph whose parent is
+/// off is marked refused instead, and comes on when its parent does; toggling a refused
+/// paragraph clears it. Notes can't be switched.
+fn toggle(s: &mut Session, v: &Value) -> CmdResult {
+    let entries = outline(&s.doc);
+    let i = match v.get("id") {
+        Some(_) => targets(v, &entries)?.first().copied().ok_or_else(|| CmdError::Params("`id` is required".into()))?,
+        None => at_caret(s, &entries).ok_or_else(|| CmdError::Failed("the caret is not in a section paragraph (run spec.import first?)".into()))?,
+    };
+    let Some(e) = entries.get(i) else { return Err(CmdError::Failed("no such paragraph".into())) };
+    if e.kind == Kind::Note {
+        return Err(CmdError::Failed(format!("{:?} is an author note: notes never print", e.id)));
+    }
+    let id = e.id.clone();
+    let mut refused = stored_refused(&s.doc);
+    if e.on || refused.contains(&id) {
+        let r = deactivate(s, &json!({"id": id}))?;
+        return Ok(json!({"id": id, "state": "off", "changed": r["changed"]}));
+    }
+    let parent_prints = e.parent.is_none_or(|p| entries.get(p).is_some_and(|x| x.on));
+    if parent_prints {
+        let r = activate(s, &json!({"id": id}))?;
+        return Ok(json!({"id": id, "state": "on", "changed": r["changed"]}));
+    }
+    refused.insert(id.clone());
+    let on: Vec<bool> = entries.iter().map(|e| e.on).collect();
+    write_refused(&mut s.doc, &entries, &on, &refused);
+    let parent = e.parent.and_then(|p| entries.get(p)).map(|p| p.id.clone());
+    Ok(json!({"id": id, "state": "refused", "parent": parent, "changed": []}))
+}
+
+/// Every section paragraph with its state, for the Spec Outline pane and the page's marks.
+fn outline_cmd(s: &mut Session, _v: &Value) -> CmdResult {
+    let st = states(&s.doc);
+    let entries: Vec<Entry> = st.iter().map(|(e, _)| e.clone()).collect();
+    let caret = at_caret(s, &entries).and_then(|i| entries.get(i)).map(|e| e.id.clone());
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let items: Vec<Value> = st
+        .iter()
+        .map(|(e, state)| {
+            *counts.entry(state.name()).or_default() += 1;
+            let text: String = s.doc.control_text(&e.range).replace(OBJ, "").chars().take(OUTLINE_TEXT).collect();
+            json!({
+                "id": e.id,
+                "kind": e.kind.name(),
+                "level": e.level,
+                "parent": e.parent.and_then(|p| entries.get(p)).map(|p| p.id.clone()),
+                "state": state.name(),
+                "block": e.range.start.path.0.first(),
+                "text": text,
+            })
+        })
+        .collect();
+    Ok(json!({"items": items, "caret": caret, "counts": counts}))
 }
 
 fn printable_cmd(s: &mut Session, _v: &Value) -> CmdResult {
@@ -573,6 +737,51 @@ mod tests {
         assert_eq!(printable(&mut s), ["p0001", "p0011", "p0012"]);
         run(&mut s, "spec.deactivate", json!({"id": "p0001"}));
         assert_eq!(printable(&mut s), Vec::<String>::new(), "the title takes everything under it along");
+    }
+
+    #[test]
+    fn toggling_a_paragraph_under_an_off_parent_marks_it_refused_until_the_parent_comes_on() {
+        let mut s = imported();
+        // p0006 (PR2) sits under p0005 (PR1), under SUMMARY (p0003), under GENERAL (p0002): all off.
+        let r = run(&mut s, "spec.toggle", json!({"id": "p0006"}));
+        assert_eq!((r["state"].clone(), r["parent"].clone()), (json!("refused"), json!("p0005")));
+        assert_eq!(s.doc.custom_prop(super::REFUSED_PROP), Some("p0006"));
+        let st = |s: &mut Session, id: &str| {
+            let o = run(s, "spec.outline", json!({}));
+            o["items"].as_array().unwrap().iter().find(|i| i["id"] == id).unwrap()["state"].as_str().unwrap().to_string()
+        };
+        assert_eq!(st(&mut s, "p0006"), "refused");
+        assert_eq!(st(&mut s, "p0004"), "note");
+        // Switching the chain on brings the refused paragraph with it.
+        run(&mut s, "spec.activate", json!({"ids": ["p0002", "p0003", "p0005"]}));
+        assert_eq!(st(&mut s, "p0006"), "on");
+        assert_eq!(s.doc.custom_prop(super::REFUSED_PROP), None);
+        // Toggling switches off (children too) and on again.
+        assert_eq!(run(&mut s, "spec.toggle", json!({"id": "p0005"}))["state"], "off");
+        assert_eq!(st(&mut s, "p0006"), "off");
+        assert_eq!(run(&mut s, "spec.toggle", json!({"id": "p0005"}))["state"], "on");
+        // Toggling a refused paragraph clears it; notes can't be toggled.
+        run(&mut s, "spec.deactivate", json!({"id": "p0003"}));
+        run(&mut s, "spec.toggle", json!({"id": "p0007"}));
+        assert_eq!(st(&mut s, "p0007"), "refused");
+        assert_eq!(run(&mut s, "spec.toggle", json!({"id": "p0007"}))["state"], "off");
+        assert_eq!(st(&mut s, "p0007"), "off");
+        assert!(s.run("spec.toggle", &json!({"id": "p0004"})).is_err());
+        // Undo takes a toggle back.
+        run(&mut s, "spec.toggle", json!({"id": "p0003"}));
+        assert_eq!(st(&mut s, "p0003"), "on");
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(st(&mut s, "p0003"), "off");
+    }
+
+    #[test]
+    fn toggle_without_an_id_uses_the_paragraph_at_the_caret() {
+        let mut s = imported();
+        let at = |_s: &Session, block: u32| wordcraft_doc::Pos::new(wordcraft_doc::StoryRef::Body, wordcraft_doc::Path(vec![block]), 0);
+        s.sel = crate::Selection::caret(at(&s, 1));
+        assert_eq!(run(&mut s, "spec.outline", json!({}))["caret"], "p0002");
+        assert_eq!(run(&mut s, "spec.toggle", json!({}))["state"], "on");
+        assert_eq!(run(&mut s, "spec.outline", json!({}))["counts"]["on"], 3, "title, GENERAL and end of section");
     }
 
     #[test]
