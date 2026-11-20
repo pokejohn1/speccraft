@@ -8,3 +8,13 @@ plan/
 /.claude/
 /target-*/
 /craft-fonts/
+
+# Speccraft (public repo): never commit author masters, project sections or exported PDFs.
+*.docx
+*.docm
+*.dotx
+*.dotm
+*.doc
+*.pdf
+*.rtf
+*.odt

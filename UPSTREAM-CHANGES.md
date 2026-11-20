@@ -22,11 +22,12 @@ Keep it current: whenever an original file is edited, add a row in the same chan
 |---|---|---|
 | `crates/engine/src/cmd/mod.rs` | Added `pub mod spec;` and `v.extend(spec::specs());` (2 lines) | Registers the spec commands |
 | `crates/engine/src/cmd/controls.rs` | `fn insert` became `pub(crate) fn insert` (1 word) | Lets the spec commands reuse the content control insert code |
+| `.gitignore` | Added a block at the end ignoring `*.docx`, `*.docm`, `*.dotx`, `*.dotm`, `*.doc`, `*.pdf`, `*.rtf`, `*.odt` | The repo is public: author masters, project sections and exported PDFs must never be committed. Upstream tracks no files of these types. To add a test file of one of these types on purpose, use `git add -f` |
 
 ## Merging a newer WordCraft
 
 1. Fetch the new version and merge it.
-2. If git reports a conflict, it will be in one of the two files above; keep both sides' changes.
+2. If git reports a conflict, it will be in one of the files above; keep both sides' changes.
 3. Run `cargo xtask ci` (the project's own full check) and make sure the spec tests still pass.
 
 ## Known issues
