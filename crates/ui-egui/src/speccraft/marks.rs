@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use egui::{Color32, Painter, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use serde_json::json;
+use wordcraft_engine::cmd::spec::fields::{self, FieldState};
 use wordcraft_engine::cmd::spec::sections::{self, State};
 use wordcraft_layout::DocLayout;
 
@@ -24,11 +25,19 @@ pub(crate) struct Marked {
     pub pieces: Vec<(usize, wordcraft_geom::Rect)>,
 }
 
+/// A fill-in as the page shows it: its state and where its text is.
+#[derive(Clone)]
+pub(crate) struct MarkedField {
+    pub state: FieldState,
+    pub pieces: Vec<(usize, wordcraft_geom::Rect)>,
+}
+
 /// The marks of a document revision laid out one way.
 pub(crate) struct MarksCache {
     rev: u64,
     layout: Arc<DocLayout>,
     pub items: Arc<Vec<Marked>>,
+    pub fields: Arc<Vec<MarkedField>>,
 }
 
 /// The section paragraphs of the document on screen and where they are, cached per revision
@@ -50,9 +59,18 @@ pub(crate) fn marked(app: &mut WordApp, layout: &Arc<DocLayout>) -> Arc<Vec<Mark
             Marked { id: e.id, state, level: e.level.unwrap_or(1), pieces }
         })
         .collect();
+    let marked_fields: Vec<MarkedField> = fields::fields(doc)
+        .into_iter()
+        .map(|f| MarkedField { state: f.state, pieces: layout.selection_rects(doc, &f.range.content_start(), &f.range.end, hint) })
+        .collect();
     let items = Arc::new(items);
-    app.speccraft.marks_cache = Some(MarksCache { rev, layout: layout.clone(), items: items.clone() });
+    app.speccraft.marks_cache = Some(MarksCache { rev, layout: layout.clone(), items: items.clone(), fields: Arc::new(marked_fields) });
     items
+}
+
+/// The fill-ins of the document on screen (after [`marked`] for the same layout).
+fn marked_fields(app: &WordApp) -> Arc<Vec<MarkedField>> {
+    app.speccraft.marks_cache.as_ref().map(|c| c.fields.clone()).unwrap_or_default()
 }
 
 /// The colours of a state's mark: fill and outline.
@@ -87,6 +105,29 @@ pub(crate) fn paint(app: &mut WordApp, ui: &mut Ui, painter: &Painter, rects: &[
     }
     let t = Tokens::get(ui.ctx());
     let clip = ui.clip_rect();
+    // Fill-ins: open ones tinted, chosen ones underlined, left-out text struck through.
+    for f in marked_fields(app).iter() {
+        for (pi, r) in &f.pieces {
+            let Some(pr) = rects.get(*pi) else { continue };
+            let scale = layout.pages.get(*pi).map_or(fallback_scale, |page| crate::canvas::page_screen_scale(*pr, page, fallback_scale));
+            let sr = Rect::from_min_size(pos2(pr.min.x + r.x * scale, pr.min.y + r.y * scale), vec2(r.w * scale, r.h * scale));
+            if !sr.intersects(clip) {
+                continue;
+            }
+            match f.state {
+                FieldState::Open => {
+                    painter.rect_filled(sr, 2.0, t.orange.gamma_multiply(0.18));
+                }
+                FieldState::Set => {
+                    painter.line_segment([sr.left_bottom(), sr.right_bottom()], Stroke::new(1.0, t.accent.gamma_multiply(0.7)));
+                }
+                FieldState::Omitted => {
+                    let y = sr.center().y;
+                    painter.line_segment([pos2(sr.min.x, y), pos2(sr.max.x, y)], Stroke::new(1.0, t.text_disabled));
+                }
+            }
+        }
+    }
     let mut clicked: Option<String> = None;
     for m in items.iter() {
         // The paragraph's extent on each page it is on.

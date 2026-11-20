@@ -42,6 +42,8 @@ pub struct Counts {
     pub breaks_moved: usize,
     /// Section breaks kept on an empty paragraph (nothing earlier could take them).
     pub breaks_kept: usize,
+    /// Fill-ins still open in what prints: (name, the master's wording).
+    pub fields_open: Vec<(String, String)>,
 }
 
 /// A copy of `doc` holding only what prints: spec items that [`sections::printable`] lists, and
@@ -118,6 +120,8 @@ pub fn printable_copy(doc: &Document) -> Result<(Document, Counts), CmdError> {
     let mut out = doc.clone();
     out.body = kept;
     out.ensure_nonempty();
+    // Fill-ins: left-out text goes; open ones print as written and are reported.
+    c.fields_open = super::fields::resolve_for_print(&mut out);
     Ok((out, c))
 }
 
@@ -144,14 +148,16 @@ fn target(s: &Session, v: &Value) -> Result<PathBuf, CmdError> {
 /// Write a PDF of the paragraphs that print. Changes nothing in the document.
 fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
     let path = target(s, v)?;
-    let (mut copy, c) = printable_copy(&s.doc)?;
+    let (mut copy, mut c) = printable_copy(&s.doc)?;
     let mut warnings = Vec::new();
     // Placeholders such as <Insert Project Name> take the project's values, in the copy only.
     let mut filled = 0;
     if let Some(project) = super::project::project_for(s.path.as_deref(), crate::p::str(v, "project"))? {
         match super::project::load(&project) {
             Ok(f) => {
-                let (n, missing) = super::project::fill_placeholders(&mut copy, &super::project::placeholder_values(&f));
+                let values = super::project::placeholder_values(&f);
+                c.fields_open.retain(|(_, original)| !super::project::filled_by_project(original, &values));
+                let (n, missing) = super::project::fill_placeholders(&mut copy, &values);
                 filled = n;
                 if !missing.is_empty() {
                     let names: Vec<String> = missing.iter().map(|m| format!("<Insert {m}>")).collect();
@@ -169,6 +175,11 @@ fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
             "{} paragraph(s) are not spec items ({} printed with the item before them): run spec.import to manage them",
             c.unmanaged, c.unmanaged_printed
         ));
+    }
+    if !c.fields_open.is_empty() {
+        let names: Vec<String> = c.fields_open.iter().take(10).map(|(n, o)| format!("{n} ({o})")).collect();
+        let more = if c.fields_open.len() > 10 { ", …" } else { "" };
+        warnings.push(format!("{} fill-ins are still open and print as written: {}{more}", c.fields_open.len(), names.join(", ")));
     }
     if c.breaks_kept > 0 {
         warnings.push(format!("{} section break(s) kept on an empty paragraph", c.breaks_kept));
@@ -188,6 +199,7 @@ fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
         "unmanaged": c.unmanaged,
         "sectionBreaksMoved": c.breaks_moved,
         "placeholdersFilled": filled,
+        "fieldsOpen": c.fields_open.len(),
         "warnings": warnings,
     }))
 }

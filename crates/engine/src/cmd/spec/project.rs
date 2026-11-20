@@ -353,6 +353,18 @@ fn insert_placeholders(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
     out
 }
 
+/// Whether a fill-in's original wording is a placeholder the project fills (`<Insert Project
+/// Name>` with a project name set, `[Owner Name]` with that value set).
+pub fn filled_by_project(original: &str, values: &BTreeMap<String, String>) -> bool {
+    let t = original.trim();
+    let name = t
+        .strip_prefix('<')
+        .and_then(|x| x.strip_suffix('>'))
+        .and_then(|x| x.trim().strip_prefix("Insert ").or_else(|| x.trim().strip_prefix("insert ")))
+        .or_else(|| t.strip_prefix('[').and_then(|x| x.strip_suffix(']')));
+    name.is_some_and(|n| values.get(&n.trim().to_lowercase()).is_some_and(|v| !v.is_empty()))
+}
+
 /// `[Name]` placeholders in `text` whose name is a project value: (byte range, name lowercased).
 fn bracket_placeholders(text: &str, values: &BTreeMap<String, String>) -> Vec<(std::ops::Range<usize>, String)> {
     let mut out = Vec::new();
@@ -557,6 +569,8 @@ fn copy_master(master: &Path, target: &Path) -> Result<(Document, MasterRef), Cm
     }
     let mut s = Session::new(doc);
     s.run("spec.import", &json!({}))?;
+    // Choices, blanks and fill-ins become fields (M7); a section with none is fine.
+    super::fields::detect(&mut s.doc)?;
     let baseline: Vec<String> =
         sections::outline(&s.doc).iter().map(|e| format!("{}:{}", e.id, fingerprint(entry_text(&s.doc, e).as_bytes()))).collect();
     let m = MasterRef { path: master.to_string_lossy().into(), version: version_stamp(&s.doc), fingerprint: fingerprint(&bytes), extra: Map::new() };
@@ -776,10 +790,29 @@ fn validate(_: &mut Session, v: &Value) -> CmdResult {
         for r in refs {
             out.push(finding("notice", "referenceMissing", file, format!("refers to Section {r}, which is not in the project")));
         }
+        // Fill-ins still open in what prints.
+        let printing: std::collections::HashSet<u32> =
+            sections::printable(&doc).iter().filter_map(|e| e.range.start.path.0.first().copied()).collect();
+        let open: Vec<String> = super::fields::fields(&doc)
+            .into_iter()
+            .filter(|f| f.state == super::fields::FieldState::Open && f.range.start.path.0.first().is_some_and(|b| printing.contains(b)))
+            .filter(|f| !filled_by_project(&f.original, &values))
+            .map(|f| f.original)
+            .collect();
+        if !open.is_empty() {
+            let shown: Vec<&str> = open.iter().take(5).map(String::as_str).collect();
+            let more = if open.len() > 5 { ", …" } else { "" };
+            out.push(finding("warning", "fieldsOpen", file, format!("{} fill-ins still open: {}{more}", open.len(), shown.join(", "))));
+        }
         // Placeholders with no value.
         let mut missing = BTreeSet::new();
+        // Those that are fill-ins are reported with the fill-ins (unless the project fills them).
+        let as_fields: BTreeSet<String> = super::fields::fields(&doc).into_iter().map(|f| f.original.to_lowercase()).collect();
         for p in all_paragraphs(&doc) {
             for (_, name) in insert_placeholders(&p.text) {
+                if as_fields.contains(&format!("<insert {name}>")) {
+                    continue;
+                }
                 if !values.get(&name).is_some_and(|v| !v.is_empty()) {
                     missing.insert(name);
                 }
@@ -914,6 +947,21 @@ mod tests {
         assert_eq!(header, "Riverside Library\t2026-14");
         let last = d.body.last().unwrap().as_para().unwrap().text.clone();
         assert_eq!(last, "Owner: City of Riverside; finish [Level 4] [Level 5]; <Insert colour>.", "choices are left alone");
+    }
+
+    #[test]
+    fn fill_ins_the_project_fills_are_not_open() {
+        let f = ProjectFile {
+            project: Info { name: "Riverside Library".into(), ..Default::default() },
+            values: [("Owner Name".to_string(), "City".to_string()), ("Empty".to_string(), String::new())].into(),
+            ..Default::default()
+        };
+        let v = placeholder_values(&f);
+        assert!(filled_by_project("<Insert Project Name>", &v));
+        assert!(filled_by_project("[Owner Name]", &v));
+        assert!(!filled_by_project("<Insert colour>", &v));
+        assert!(!filled_by_project("<Insert Empty>", &v));
+        assert!(!filled_by_project("[1/2 inch] [5/8 inch]", &v));
     }
 
     #[test]

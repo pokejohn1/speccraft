@@ -43,6 +43,7 @@ impl Filter {
 pub(crate) enum View {
     #[default]
     Outline,
+    Fields,
     Printed,
 }
 
@@ -88,7 +89,7 @@ fn go_to(app: &mut WordApp, block: u64) {
 pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     ui.horizontal(|ui| {
-        for (v, label) in [(View::Outline, "Outline"), (View::Printed, "Printed")] {
+        for (v, label) in [(View::Outline, "Outline"), (View::Fields, "Fill-ins"), (View::Printed, "Printed")] {
             if ui.selectable_label(app.speccraft.view == v, tl!(label)).clicked() {
                 app.speccraft.view = v;
             }
@@ -97,6 +98,9 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     ui.separator();
     if app.speccraft.view == View::Printed {
         return printed(app, ui);
+    }
+    if app.speccraft.view == View::Fields {
+        return fill_ins(app, ui);
     }
     let o = outline(app);
     let items: Vec<Value> = o.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -182,6 +186,139 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
             Ok(r) if r["state"] == "refused" => app.status(tl!("Its parent is off: it will print once the parent is switched on")),
             Ok(_) => {}
             Err(e) => app.status(e),
+        }
+    }
+    if let Some(b) = goto {
+        go_to(app, b);
+    }
+}
+
+/// `spec.fields.list` for the document on screen, cached per revision.
+pub(crate) fn field_list(app: &mut WordApp) -> Value {
+    let key = (app.session.document_id(), app.session.rev());
+    if let Some((k, v)) = &app.speccraft.fields_cache
+        && *k == key
+    {
+        return v.clone();
+    }
+    let v = app.session.run("spec.fields.list", &json!({})).unwrap_or(Value::Null);
+    app.speccraft.fields_cache = Some((key, v.clone()));
+    v
+}
+
+/// The Fill-ins view: every choice, blank and fill-in, with a control to settle it.
+fn fill_ins(app: &mut WordApp, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    let list = field_list(app);
+    let all: Vec<Value> = list.get("fields").and_then(Value::as_array).cloned().unwrap_or_default();
+    if all.is_empty() {
+        ui.label(RichText::new(tl!("No fill-ins yet.")).font(regular(13.0)));
+        ui.label(
+            RichText::new(tl!("Find Fill-ins turns [choices], [optional text], ___ blanks and <Insert …> into fields.")).small().color(t.text_dim),
+        );
+        ui.add_space(6.0);
+        if ui.button(tl!("Find Fill-ins")).clicked()
+            && let Err(e) = app.run("spec.fields.detect", json!({}))
+        {
+            app.status(e);
+        }
+        return;
+    }
+    let open = all.iter().filter(|f| f["state"] == "open").count();
+    let open_printing = list.get("openPrinting").and_then(Value::as_u64).unwrap_or(0);
+    ui.label(
+        RichText::new(crate::i18n::fmt(
+            tl!("{n} fill-ins · {open} open ({printing} in printing paragraphs)"),
+            &[("n", &all.len().to_string()), ("open", &open.to_string()), ("printing", &open_printing.to_string())],
+        ))
+        .small()
+        .color(t.text_dim),
+    );
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut app.speccraft.open_only, tl!("Open only"));
+        ui.checkbox(&mut app.speccraft.printing_only, tl!("Printing only"));
+    });
+    if ui.small_button(tl!("Find Fill-ins")).on_hover_text(tl!("Look again for choices and blanks not yet made into fields")).clicked()
+        && let Err(e) = app.run("spec.fields.detect", json!({}))
+    {
+        app.status(e);
+    }
+    ui.separator();
+    let mut action: Option<Value> = None;
+    let mut goto: Option<u64> = None;
+    egui::ScrollArea::vertical().id_salt("spec_fill_ins").auto_shrink([false, false]).show(ui, |ui| {
+        for f in &all {
+            let s = |k: &str| f.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+            let state = s("state");
+            let prints = f.get("prints").and_then(Value::as_bool).unwrap_or(false);
+            if (app.speccraft.open_only && state != "open") || (app.speccraft.printing_only && !prints) {
+                continue;
+            }
+            let id = s("id");
+            ui.horizontal(|ui| {
+                let color = match state.as_str() {
+                    "open" => t.orange,
+                    "omitted" => t.text_disabled,
+                    _ => t.text,
+                };
+                let name = if prints { s("name") } else { format!("{} · {}", s("name"), tl!("paragraph off")) };
+                if ui
+                    .add(egui::Label::new(RichText::new(name).font(semibold(12.0)).color(color)).sense(egui::Sense::click()))
+                    .on_hover_text(tl!("Go to it"))
+                    .clicked()
+                {
+                    goto = f.get("block").and_then(Value::as_u64);
+                }
+                if state != "open" && ui.small_button("↺").on_hover_text(tl!("Back to the master's wording")).clicked() {
+                    action = Some(json!({"id": id, "reset": true}));
+                }
+            });
+            ui.label(RichText::new(s("original")).small().color(t.text_dim));
+            let options: Vec<String> = f
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|o| o.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_default();
+            match s("kind").as_str() {
+                "choice" | "optional" => {
+                    let current = match state.as_str() {
+                        "open" => tl!("Choose…").to_string(),
+                        "omitted" => tl!("(leave out)").to_string(),
+                        _ => s("value"),
+                    };
+                    craft_ui::ComboBox::from_id_salt(("spec_field", &id)).selected_text(current).width(ui.available_width() - 8.0).show_ui(
+                        ui,
+                        |ui| {
+                            for (i, o) in options.iter().enumerate() {
+                                if ui.selectable_label(s("value") == *o, o).clicked() {
+                                    action = Some(json!({"id": id, "option": i}));
+                                }
+                            }
+                            if s("kind") == "optional" && ui.selectable_label(state == "omitted", tl!("(leave out)")).clicked() {
+                                action = Some(json!({"id": id, "omit": true}));
+                            }
+                        },
+                    );
+                }
+                _ => {
+                    let draft = app.speccraft.drafts.entry(id.clone()).or_insert_with(|| if state == "open" { String::new() } else { s("value") });
+                    let hint = if s("kind") == "date" { tl!("e.g. December 1, 2026") } else { tl!("Type the value") };
+                    let resp = ui.add(egui::TextEdit::singleline(draft).hint_text(hint).desired_width(f32::INFINITY));
+                    let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if (enter || resp.lost_focus()) && !draft.trim().is_empty() && draft.trim() != s("value") {
+                        action = Some(json!({"id": id, "value": draft.trim()}));
+                    }
+                }
+            }
+            ui.add_space(6.0);
+        }
+    });
+    if let Some(params) = action {
+        if let Some(id) = params.get("id").and_then(Value::as_str) {
+            app.speccraft.drafts.remove(id);
+        }
+        if let Err(e) = app.run("spec.fields.set", params) {
+            app.status(e);
         }
     }
     if let Some(b) = goto {

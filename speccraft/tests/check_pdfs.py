@@ -29,6 +29,9 @@ CASES = [
     ("joint-sealants", "079200 Joint Sealants.docx", ["p0025", "p0028", "p0041", "p0044", "p0069"]),
     # A stray unstyled paragraph switched off must not take the rest of its Part along.
     ("joint-sealants-stray", "079200 Joint Sealants.docx", ["p0060"]),
+    # Fill-ins (M7): a blank typed, a choice made, the rest left open and printed as written.
+    ("joint-sealants-fields", "079200 Joint Sealants.docx", ["p0028", "p0041", "p0044"],
+     ["spec.fields.detect", 'spec.fields.set={"id": "f0001", "value": "40"}', 'spec.fields.set={"id": "f0004", "option": 1}']),
 ]
 FURNITURE = re.compile(r"^(<Insert Project Name>.*|Speccraft test master: .*)$")
 
@@ -53,9 +56,11 @@ def main():
         masters = tmp / "masters"
         sys.argv = ["make_masters", str(masters)]
         make_masters.main()
-        for name, master, off in CASES:
+        for case in CASES:
+            name, master, off = case[:3]
+            cmds = [x for c in (case[3] if len(case) > 3 else []) for x in ("--cmd", c)]
             out = tmp / "out"
-            sys.argv = ["run_selection", str(cli), str(masters / master), str(out), name, *off]
+            sys.argv = ["run_selection", str(cli), str(masters / master), str(out), name, *off, *cmds]
             run_selection.main()
             got = normalise(out / f"{name}.pdf")
             want_file = expected_dir / f"{name}.txt"

@@ -44,6 +44,11 @@ pub struct SpecUi {
     /// Caches: the page's marks, `spec.outline`, and the Printed view's pages.
     pub(crate) marks_cache: Option<marks::MarksCache>,
     pub(crate) outline_cache: Option<((u64, u64), Value)>,
+    pub(crate) fields_cache: Option<((u64, u64), Value)>,
+    /// The Fill-ins view: filters, and text typed but not yet set, by field id.
+    pub(crate) open_only: bool,
+    pub(crate) printing_only: bool,
+    pub(crate) drafts: std::collections::HashMap<String, String>,
     pub(crate) printed: Option<outline::Printed>,
     /// The project information being edited in the Sections pane.
     info_form: Option<InfoForm>,
@@ -82,7 +87,11 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
         "ui.spec.outlinePane" => {
             app.speccraft.outline_open = p.get("value").and_then(Value::as_bool).unwrap_or(!app.speccraft.outline_open);
             if let Some(v) = s("view") {
-                app.speccraft.view = if v == "printed" { outline::View::Printed } else { outline::View::Outline };
+                app.speccraft.view = match v.as_str() {
+                    "printed" => outline::View::Printed,
+                    "fields" => outline::View::Fields,
+                    _ => outline::View::Outline,
+                };
             }
             Ok(json!({"open": app.speccraft.outline_open}))
         }
@@ -297,6 +306,7 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
         big_toggle(ui, app, "outline", "Outline\nPane", "ui.spec.outlinePane", open);
         let shown = !app.speccraft.hide_marks;
         big_toggle(ui, app, "pilcrow", "Show\nMarks", "ui.spec.marks", shown);
+        big(ui, app, "ccComboBox", "Fill-ins", "ui.spec.outlinePane", json!({"value": true, "view": "fields"}), false);
         big(ui, app, "readMode", "Printed\nView", "ui.spec.outlinePane", json!({"value": true, "view": "printed"}), false);
         big(ui, app, "export", "Export\nPDF", "spec.exportPdf", json!({}), false);
     });
@@ -745,6 +755,37 @@ mod tests {
         save_info(&mut a, &info, &form).unwrap();
         assert_eq!(a.speccraft.info.as_ref().unwrap()["values"], json!({}));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_fill_ins_view_lists_and_the_page_marks_fields() {
+        let mut a = imported_app();
+        // Give the paragraph a choice and a blank, then find them.
+        let at = wordcraft_doc::Pos::new(wordcraft_doc::StoryRef::Body, wordcraft_doc::Path(vec![4]), 0);
+        a.run("caret.set", json!({"pos": wordcraft_engine::cmd::pos_json(&at)})).unwrap();
+        a.run("text.insert", json!({"text": "Thickness [1/2 inch] [5/8 inch], gap ___ mm. "})).unwrap();
+        let r = a.run("spec.fields.detect", json!({})).unwrap();
+        assert_eq!(r["added"], 2, "{r}");
+        a.run("ui.spec.outlinePane", json!({"value": true, "view": "fields"})).unwrap();
+        assert_eq!(a.speccraft.view, outline::View::Fields);
+        assert_eq!(outline::field_list(&mut a)["count"], 2);
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        for open_only in [false, true] {
+            a.speccraft.open_only = open_only;
+            let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                egui::Panel::right("fill_ins_test").default_size(320.0).show(ui, |ui| outline::pane(&mut a, ui));
+            });
+            out.drop_without_applying_deltas();
+        }
+        let layout = a.session.layout();
+        marks::marked(&mut a, &layout);
+        let fields = a.speccraft.marks_cache.as_ref().unwrap().fields.clone();
+        assert_eq!(fields.len(), 2);
+        assert!(fields.iter().all(|f| !f.pieces.is_empty()));
+        // Setting a choice shows in the list.
+        a.run("spec.fields.set", json!({"id": "f0001", "option": 1})).unwrap();
+        assert_eq!(outline::field_list(&mut a)["fields"][0]["value"], "5/8 inch");
     }
 
     #[test]
