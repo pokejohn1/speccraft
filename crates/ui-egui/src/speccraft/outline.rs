@@ -49,6 +49,7 @@ pub(crate) enum View {
     Outline,
     Fields,
     Rules,
+    Checks,
     Printed,
 }
 
@@ -96,7 +97,9 @@ pub(crate) fn go_to(app: &mut WordApp, block: u64) {
 pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     ui.horizontal(|ui| {
-        for (v, label) in [(View::Outline, "Outline"), (View::Fields, "Fill-ins"), (View::Rules, "Rules"), (View::Printed, "Printed")] {
+        for (v, label) in
+            [(View::Outline, "Outline"), (View::Fields, "Fill-ins"), (View::Rules, "Rules"), (View::Checks, "Checks"), (View::Printed, "Printed")]
+        {
             if ui.selectable_label(app.speccraft.view == v, tl!(label)).clicked() {
                 app.speccraft.view = v;
             }
@@ -111,6 +114,9 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     }
     if app.speccraft.view == View::Rules {
         return super::rules_view::pane(app, ui);
+    }
+    if app.speccraft.view == View::Checks {
+        return super::checks::section_view(app, ui);
     }
     let o = outline(app);
     let items: Vec<Value> = o.get("items").and_then(Value::as_array).cloned().unwrap_or_default();

@@ -17,6 +17,7 @@ use crate::file_dialogs::{AfterPick, FileDialogRequest};
 use crate::theme::{Tokens, regular, semibold};
 use crate::widgets::{big, big_toggle, group};
 
+pub(crate) mod checks;
 pub(crate) mod library;
 pub(crate) mod marks;
 pub(crate) mod outline;
@@ -59,6 +60,12 @@ pub struct SpecUi {
     pub(crate) printed: Option<outline::Printed>,
     /// The project information being edited in the Sections pane.
     info_form: Option<InfoForm>,
+    /// The Checks view's `spec.check`, per document revision (M10).
+    pub(crate) check_cache: Option<((u64, u64), Value)>,
+    /// Check Project's accepted findings are listed too.
+    pub(crate) show_accepted: bool,
+    /// The last Publish stopped at errors (the report offers Publish Anyway).
+    pub(crate) publish_blocked: bool,
     /// The Master Library pane (M9).
     pub library: library::LibraryUi,
 }
@@ -103,6 +110,7 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
                     "printed" => outline::View::Printed,
                     "fields" => outline::View::Fields,
                     "rules" => outline::View::Rules,
+                    "checks" => outline::View::Checks,
                     _ => outline::View::Outline,
                 };
             }
@@ -135,9 +143,33 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
             let file = s("file").ok_or("`file` must name a section file of the project")?;
             open_section(app, &file)
         }
+        "ui.spec.goTo" => {
+            let file = s("file").ok_or("`file` must name a section file of the project")?;
+            let shown = app.session.path.as_deref().and_then(Path::file_name).is_some_and(|n| n.to_string_lossy() == file.as_str());
+            if !shown {
+                open_section(app, &file)?;
+            }
+            if let Some(para) = s("para") {
+                checks::go_to_para(app, &para)?;
+            }
+            Ok(json!({"file": file}))
+        }
+        "ui.spec.acknowledge" => {
+            let path = project_path(app)?;
+            let key = p.get("key").and_then(Value::as_str).ok_or("`key` must be a finding's key")?;
+            let mut args = json!({"path": path, "key": key, "undo": p.get("undo").and_then(Value::as_bool).unwrap_or(false)});
+            if let Some(n) = s("note") {
+                args["note"] = json!(n);
+            }
+            let r = app.run("spec.project.acknowledge", args)?;
+            let check = app.run("spec.project.validate", json!({"path": path}))?;
+            app.speccraft.findings = Some(check);
+            Ok(r)
+        }
         "ui.spec.check" => {
             let path = project_path(app)?;
             let r = app.run("spec.project.validate", json!({"path": path}))?;
+            app.speccraft.publish_blocked = false;
             app.speccraft.findings = Some(r.clone());
             app.speccraft.pane_open = true;
             Ok(r)
@@ -145,7 +177,20 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
         "ui.spec.publish" => {
             let path = project_path(app)?;
             save_if_changed(app)?;
-            let r = app.run("spec.project.publish", json!({"path": path}))?;
+            let force = p.get("force").and_then(Value::as_bool).unwrap_or(false);
+            let r = match app.run("spec.project.publish", json!({"path": path, "force": force})) {
+                Ok(r) => r,
+                Err(e) => {
+                    // Stopped by errors: show them, with Publish Anyway beside them.
+                    if let Ok(check) = app.run("spec.project.validate", json!({"path": path})) {
+                        app.speccraft.publish_blocked = check.get("errors").and_then(Value::as_u64).unwrap_or(0) > 0;
+                        app.speccraft.findings = Some(check);
+                        app.speccraft.pane_open = true;
+                    }
+                    return Err(e);
+                }
+            };
+            app.speccraft.publish_blocked = false;
             let n = r.get("sections").and_then(Value::as_array).map_or(0, Vec::len);
             let failed = r.get("failed").and_then(Value::as_u64).unwrap_or(0);
             let msg = if failed == 0 {
@@ -325,6 +370,7 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
         big_toggle(ui, app, "pilcrow", "Show\nMarks", "ui.spec.marks", shown);
         big(ui, app, "ccComboBox", "Fill-ins", "ui.spec.outlinePane", json!({"value": true, "view": "fields"}), false);
         big(ui, app, "link", "Rules", "ui.spec.outlinePane", json!({"value": true, "view": "rules"}), false);
+        big(ui, app, "checkErrors", "Check\nSection", "ui.spec.outlinePane", json!({"value": true, "view": "checks"}), false);
         big(ui, app, "readMode", "Printed\nView", "ui.spec.outlinePane", json!({"value": true, "view": "printed"}), false);
         big(ui, app, "export", "Export\nPDF", "spec.exportPdf", json!({}), false);
     });
@@ -474,32 +520,7 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
         if let Some(f) = &findings {
             ui.add_space(8.0);
             ui.separator();
-            let n = |k: &str| f.get(k).and_then(Value::as_u64).unwrap_or(0).to_string();
-            let summary = crate::i18n::fmt(
-                tl!("Check: {e} errors, {w} warnings, {n} notices"),
-                &[("e", &n("errors")), ("w", &n("warnings")), ("n", &n("notices"))],
-            );
-            ui.label(RichText::new(summary).font(semibold(12.0)));
-            for x in f.get("findings").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
-                let sev = x.get("severity").and_then(Value::as_str).unwrap_or("");
-                let color = match sev {
-                    "error" => t.red,
-                    "warning" => t.orange,
-                    _ => t.text_dim,
-                };
-                let file = x.get("file").and_then(Value::as_str);
-                let msg = x.get("message").and_then(Value::as_str).unwrap_or("");
-                let line = match file {
-                    Some(file) => format!("{file}: {msg}"),
-                    None => msg.to_string(),
-                };
-                let resp = ui.add(egui::Label::new(RichText::new(line).small().color(color)).wrap().sense(egui::Sense::click()));
-                if let Some(file) = file
-                    && resp.clicked()
-                {
-                    action = Some(("ui.spec.openSection", json!({"file": file})));
-                }
-            }
+            checks::project_report(app, ui, f, &mut action);
         }
     });
     if let Some((id, params)) = action

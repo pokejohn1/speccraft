@@ -79,7 +79,10 @@ pub fn specs() -> Vec<CommandSpec> {
             .pure(),
         CommandSpec::new("spec.project.validate", "Check Project", LOC, validate).params(r#"{"path": string (the project's .speccraft file)}"#).pure(),
         CommandSpec::new("spec.project.publish", "Publish Project Sections", LOC, publish)
-            .params(r#"{"path": string (the project's .speccraft file), "folder"?: string (default: Published beside the project file)}"#)
+            .params(r#"{"path": string (the project's .speccraft file), "folder"?: string (default: Published beside the project file), "force"?: bool (publish even when Check Project finds errors)}"#)
+            .pure(),
+        CommandSpec::new("spec.project.acknowledge", "Acknowledge Finding", LOC, acknowledge)
+            .params(r#"{"path": string (the project's .speccraft file), "key": string (a warning or notice's key from spec.project.validate), "note"?: string, "undo"?: bool}"#)
             .pure(),
     ]
 }
@@ -105,6 +108,19 @@ pub struct ProjectFile {
     /// Rules between sections (M6), checked by `spec.project.validate`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<ProjectRule>,
+    /// Warnings and notices the author has looked at and accepted (M10), by finding key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acknowledged: Vec<Acknowledged>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// A finding the author accepted, with why.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Acknowledged {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -930,15 +946,6 @@ fn validate(_: &mut Session, v: &Value) -> CmdResult {
         }
         let entries = sections::outline(&doc);
         printing_by_number.insert(number_key(&s.number), entries.iter().filter(|e| e.on).map(|e| e.id.clone()).collect());
-        // The section's own rules: conflicts, overrides, problems.
-        let mut probe = Session::new(doc.clone());
-        if let Ok(r) = probe.run("spec.rules.check", &json!({})) {
-            for x in r.get("findings").and_then(Value::as_array).into_iter().flatten() {
-                let sev = x.get("severity").and_then(Value::as_str).unwrap_or("notice");
-                let m = x.get("message").and_then(Value::as_str).unwrap_or("");
-                out.push(finding(sev, "sectionRule", file, m.to_string()));
-            }
-        }
         if entries.is_empty() {
             out.push(finding("warning", "notImported", file, "no spec paragraphs yet: open it and import it".into()));
             continue;
@@ -951,31 +958,24 @@ fn validate(_: &mut Session, v: &Value) -> CmdResult {
                 "this file is not a project copy (it may be a master): masters should be added by copying".into(),
             ));
         }
-        // References in what prints, to sections not in the project.
-        let mut refs = BTreeSet::new();
+        // References in what prints, to sections not in the project (at their first mention).
+        let mut refs: BTreeMap<String, String> = BTreeMap::new();
         for e in sections::printable(&doc) {
             for r in referenced_sections(&entry_text(&doc, &e)) {
                 if !have.contains(&number_key(&r)) && number_key(&r) != number_key(&s.number) {
-                    refs.insert(r);
+                    refs.entry(r).or_insert_with(|| e.id.clone());
                 }
             }
         }
-        for r in refs {
-            out.push(finding("notice", "referenceMissing", file, format!("refers to Section {r}, which is not in the project")));
+        for (r, para) in refs {
+            let mut x = finding("notice", "referenceMissing", file, format!("refers to Section {r}, which is not in the project"));
+            x["para"] = json!(para);
+            out.push(x);
         }
-        // Fill-ins still open in what prints.
-        let printing: std::collections::HashSet<u32> =
-            sections::printable(&doc).iter().filter_map(|e| e.range.start.path.0.first().copied()).collect();
-        let open: Vec<String> = super::fields::fields(&doc)
-            .into_iter()
-            .filter(|f| f.state == super::fields::FieldState::Open && f.range.start.path.0.first().is_some_and(|b| printing.contains(b)))
-            .filter(|f| !filled_by_project(&f.original, &values))
-            .map(|f| f.original)
-            .collect();
-        if !open.is_empty() {
-            let shown: Vec<&str> = open.iter().take(5).map(String::as_str).collect();
-            let more = if open.len() > 5 { ", …" } else { "" };
-            out.push(finding("warning", "fieldsOpen", file, format!("{} fill-ins still open: {}{more}", open.len(), shown.join(", "))));
+        // The section's own checks (M10): open fill-ins, its rules, empty headings, leftovers.
+        for mut x in super::quality::check(&doc, &values) {
+            x["file"] = json!(s.file);
+            out.push(x);
         }
         // Placeholders with no value.
         let mut missing = BTreeSet::new();
@@ -992,7 +992,11 @@ fn validate(_: &mut Session, v: &Value) -> CmdResult {
             }
         }
         for name in missing {
-            out.push(finding("warning", "placeholder", file, format!("<Insert {name}> has no project value")));
+            let mut x = finding("warning", "placeholder", file, format!("<Insert {name}> has no project value"));
+            // Where it is in the body, if it is; it may be in a header or footer.
+            let needle = format!("<insert {name}>");
+            x["para"] = json!(entries.iter().find(|e| entry_text(&doc, e).to_lowercase().contains(&needle)).map(|e| e.id.clone()));
+            out.push(x);
         }
         // A newer master.
         if let Some(m) = &s.master
@@ -1003,12 +1007,65 @@ fn validate(_: &mut Session, v: &Value) -> CmdResult {
         }
     }
     check_project_rules(&f, &values, &have, &printing_by_number, &mut out);
-    let count = |sev: &str| out.iter().filter(|x| x["severity"] == sev).count();
-    Ok(json!({"errors": count("error"), "warnings": count("warning"), "notices": count("notice"), "findings": out}))
+    Ok(report(&f, out))
 }
 
-fn publish(_: &mut Session, v: &Value) -> CmdResult {
+/// A finding's key, to acknowledge it by: what it is and where, not its wording's details.
+fn finding_key(x: &Value) -> String {
+    let s = |k: &str| x.get(k).and_then(Value::as_str).unwrap_or("");
+    format!("{}|{}|{}|{}|{}", s("severity"), s("code"), s("file"), s("para"), fingerprint(s("message").as_bytes()))
+}
+
+/// The findings with their keys and acknowledgements, and the counts of those not acknowledged.
+fn report(f: &ProjectFile, mut out: Vec<Value>) -> Value {
+    let acks: BTreeMap<&str, &str> = f.acknowledged.iter().map(|a| (a.key.as_str(), a.note.as_str())).collect();
+    for x in &mut out {
+        let key = finding_key(x);
+        if x.get("para").is_none() {
+            x["para"] = Value::Null;
+        }
+        if let Some(note) = acks.get(key.as_str()).filter(|_| x["severity"] != "error") {
+            x["acknowledged"] = json!(true);
+            x["note"] = json!(note);
+        }
+        x["key"] = json!(key);
+    }
+    let count = |sev: &str| out.iter().filter(|x| x["severity"] == sev && x.get("acknowledged").is_none()).count();
+    let acked = out.iter().filter(|x| x.get("acknowledged").is_some()).count();
+    json!({"errors": count("error"), "warnings": count("warning"), "notices": count("notice"), "acknowledged": acked, "findings": out})
+}
+
+fn acknowledge(_: &mut Session, v: &Value) -> CmdResult {
     let path = project_path(v)?;
+    let mut f = load(&path)?;
+    let key = p::req_str(v, "key")?.trim().to_string();
+    if key.is_empty() || key.chars().count() > 600 || key.split('|').count() != 5 {
+        return Err(CmdError::Params("`key` must be a finding's key from spec.project.validate".into()));
+    }
+    if key.starts_with("error|") {
+        return Err(CmdError::Failed("errors can't be acknowledged: fix them, or publish with force".into()));
+    }
+    f.acknowledged.retain(|a| a.key != key);
+    let undo = p::bool(v, "undo").unwrap_or(false);
+    if !undo {
+        if f.acknowledged.len() >= 10_000 {
+            return Err(CmdError::Failed("too many acknowledged findings".into()));
+        }
+        let note = p::str(v, "note").unwrap_or("").trim().chars().take(500).collect();
+        f.acknowledged.push(Acknowledged { key: key.clone(), note, extra: Map::new() });
+    }
+    store(&path, &f)?;
+    Ok(json!({"key": key, "acknowledged": !undo, "count": f.acknowledged.len()}))
+}
+
+fn publish(s: &mut Session, v: &Value) -> CmdResult {
+    let path = project_path(v)?;
+    // Check first (M10): errors stop publishing unless the author says otherwise.
+    let checked = validate(s, &json!({"path": path.to_string_lossy()}))?;
+    let errors = checked.get("errors").and_then(Value::as_u64).unwrap_or(0);
+    if errors > 0 && !p::bool(v, "force").unwrap_or(false) {
+        return Err(CmdError::Failed(format!("Check Project found {errors} errors: fix them first, or publish with force")));
+    }
     let f = load(&path)?;
     let dir = folder(&path);
     let out_dir = match p::str(v, "folder") {
@@ -1034,7 +1091,8 @@ fn publish(_: &mut Session, v: &Value) -> CmdResult {
         });
     }
     let failed = done.iter().filter(|d| d.get("error").is_some()).count();
-    Ok(json!({"folder": out_dir.to_string_lossy(), "sections": done, "failed": failed}))
+    let check = json!({"errors": errors, "warnings": checked["warnings"], "notices": checked["notices"]});
+    Ok(json!({"folder": out_dir.to_string_lossy(), "sections": done, "failed": failed, "check": check}))
 }
 
 #[cfg(test)]
@@ -1212,7 +1270,19 @@ mod tests {
         run("spec.project.set", json!({"path": path, "number": "2026-14", "values": {"Architect Name": "Studio North"}}));
         run("spec.project.requires", json!({"path": path, "file": "gypsum.docx", "requires": []}));
         let r = run("spec.project.validate", json!({"path": path}));
-        assert_eq!((r["errors"].clone(), r["warnings"].clone()), (json!(0), json!(0)), "{r}");
+        // Nothing is chosen in either copy yet: one warning each, which the author can accept.
+        assert_eq!((r["errors"].clone(), r["warnings"].clone()), (json!(0), json!(2)), "{r}");
+        for x in r["findings"].as_array().unwrap() {
+            assert_eq!(x["code"], "nothingPrints", "{x}");
+            run("spec.project.acknowledge", json!({"path": path, "key": x["key"], "note": "choosing later"}));
+        }
+        let r = run("spec.project.validate", json!({"path": path}));
+        assert_eq!((r["warnings"].clone(), r["acknowledged"].clone()), (json!(0), json!(2)), "{r}");
+        assert_eq!(r["findings"][0]["note"], "choosing later");
+        let key = r["findings"][0]["key"].clone();
+        run("spec.project.acknowledge", json!({"path": path, "key": key, "undo": true}));
+        assert_eq!(run("spec.project.validate", json!({"path": path}))["warnings"], 1);
+        assert!(fails("spec.project.acknowledge", json!({"path": path, "key": "error|missingFile|a.docx||0"})).contains("can't be acknowledged"));
 
         // Switch everything on in one copy: now the reference to 07 9200 prints.
         let g = dir.join("project").join("gypsum.docx");
@@ -1250,8 +1320,14 @@ mod tests {
         let m = dir.join("masters").join("gypsum.docx");
         save(&master("09 2900", "GYPSUM BOARD"), &m);
         run("spec.project.addSection", json!({"path": path, "master": m.to_string_lossy()}));
+        // An error stops publishing until it is fixed or the author forces it.
+        run("spec.project.requires", json!({"path": path, "file": "gypsum.docx", "requires": ["07 9200"]}));
+        assert!(fails("spec.project.publish", json!({"path": path})).contains("1 errors"));
+        assert_eq!(run("spec.project.publish", json!({"path": path, "force": true}))["check"]["errors"], 1);
+        run("spec.project.requires", json!({"path": path, "file": "gypsum.docx", "requires": []}));
         let out = run("spec.project.publish", json!({"path": path}));
         assert_eq!(out["failed"], 0, "{out}");
+        assert_eq!(out["check"]["errors"], 0);
         let pdf = dir.join("project").join("Published").join("gypsum.pdf");
         assert!(std::fs::read(&pdf).unwrap().starts_with(b"%PDF"));
 
