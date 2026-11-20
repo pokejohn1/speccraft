@@ -35,8 +35,8 @@ impl Filter {
         match self {
             Filter::Changed => origin == "modified" || origin == "added",
             Filter::All => true,
-            Filter::Printing => state == "on",
-            Filter::Off => state == "off" || state == "refused",
+            Filter::Printing => state == "on" || state == "linked",
+            Filter::Off => state == "off" || state == "refused" || state == "overridden",
             Filter::Notes => state == "note",
         }
     }
@@ -48,6 +48,7 @@ pub(crate) enum View {
     #[default]
     Outline,
     Fields,
+    Rules,
     Printed,
 }
 
@@ -75,6 +76,8 @@ pub(crate) fn outline(app: &mut WordApp) -> Value {
 fn state_of(name: &str) -> State {
     match name {
         "on" => State::On,
+        "linked" => State::Linked,
+        "overridden" => State::Overridden,
         "refused" => State::Refused,
         "note" => State::Note,
         _ => State::Off,
@@ -82,7 +85,7 @@ fn state_of(name: &str) -> State {
 }
 
 /// Move the caret to the start of top-level body paragraph `block` and bring it into view.
-fn go_to(app: &mut WordApp, block: u64) {
+pub(crate) fn go_to(app: &mut WordApp, block: u64) {
     let pos = wordcraft_doc::Pos::new(wordcraft_doc::StoryRef::Body, wordcraft_doc::Path(vec![block as u32]), 0);
     if app.run("caret.set", json!({"pos": wordcraft_engine::cmd::pos_json(&pos)})).is_ok() {
         app.canvas.scroll_to_caret = true;
@@ -93,7 +96,7 @@ fn go_to(app: &mut WordApp, block: u64) {
 pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     ui.horizontal(|ui| {
-        for (v, label) in [(View::Outline, "Outline"), (View::Fields, "Fill-ins"), (View::Printed, "Printed")] {
+        for (v, label) in [(View::Outline, "Outline"), (View::Fields, "Fill-ins"), (View::Rules, "Rules"), (View::Printed, "Printed")] {
             if ui.selectable_label(app.speccraft.view == v, tl!(label)).clicked() {
                 app.speccraft.view = v;
             }
@@ -105,6 +108,9 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     }
     if app.speccraft.view == View::Fields {
         return fill_ins(app, ui);
+    }
+    if app.speccraft.view == View::Rules {
+        return super::rules_view::pane(app, ui);
     }
     let o = outline(app);
     let items: Vec<Value> = o.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -165,7 +171,7 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
                 if st == State::Note {
                     ui.label(RichText::new("//").small().color(t.text_dim)).on_hover_text(tl!(super::marks::describe(st)));
                 } else {
-                    let mut on = st == State::On;
+                    let mut on = matches!(st, State::On | State::Linked);
                     let resp = ui.checkbox(&mut on, "").on_hover_text(tl!(super::marks::describe(st)));
                     if st == State::Refused {
                         let c = resp.rect.left_center() + egui::vec2(9.0, 0.0);
@@ -178,7 +184,7 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
                 let mut text =
                     RichText::new(s("text")).font(if matches!(kind, "title" | "part" | "article" | "end") { semibold(12.0) } else { regular(12.0) });
                 text = match st {
-                    State::On => text.color(t.text),
+                    State::On | State::Linked => text.color(t.text),
                     State::Note => text.italics().color(t.text_dim),
                     _ => text.color(t.text_disabled),
                 };
@@ -421,12 +427,32 @@ fn details(app: &mut WordApp, ui: &mut Ui, items: &[Value], caret: Option<&str>,
     ui.label(RichText::new(format!("{kind}{level}")).font(semibold(12.5)));
     let state = state_of(&s(it, "state"));
     ui.label(RichText::new(tl!(super::marks::describe(state))).small());
+    // Why, in the rules' words (the engine's sentences, as for an agent).
+    let why_key = (app.session.document_id(), app.session.rev(), s(it, "id"));
+    let reasons = match &app.speccraft.why_cache {
+        Some((k, v)) if *k == why_key => v.clone(),
+        _ => {
+            let v: Vec<String> = app
+                .session
+                .run("spec.why", &json!({"id": s(it, "id")}))
+                .ok()
+                .and_then(|r| r.get("reasons").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()))
+                .unwrap_or_default();
+            app.speccraft.why_cache = Some((why_key, v.clone()));
+            v
+        }
+    };
+    if reasons.iter().any(|r| r.contains("Rule ") || r.contains("rule")) {
+        for r in &reasons {
+            ui.label(RichText::new(format!("• {r}")).small().color(t.text_dim));
+        }
+    }
     let parent = it.get("parent").and_then(Value::as_str).and_then(|p| items.iter().find(|i| i["id"] == p));
     if let Some(p) = parent {
         let text: String = s(p, "text").chars().take(60).collect();
         let pstate = state_of(&s(p, "state"));
         let line = crate::i18n::fmt(tl!("Under: {text}"), &[("text", &text)]);
-        let color = if pstate == State::On { t.text_dim } else { t.orange };
+        let color = if matches!(pstate, State::On | State::Linked) { t.text_dim } else { t.orange };
         ui.label(RichText::new(line).small().color(color));
     }
     let id = s(it, "id");

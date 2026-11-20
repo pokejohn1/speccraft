@@ -28,6 +28,9 @@ pub const STATE_PROP: &str = "Speccraft.On";
 /// Document property: ids the author tried to switch on while their parent was off (SpecLink's
 /// "refused" state). They come on by themselves once their parent prints.
 pub const REFUSED_PROP: &str = "Speccraft.Refused";
+/// Document property: ids the author switched off although a rule turned them on (M6: the
+/// author has the last say). Switching one on again lifts it.
+pub const OVERRIDDEN_PROP: &str = "Speccraft.Overridden";
 /// Characters of a paragraph's text `spec.outline` returns.
 const OUTLINE_TEXT: usize = 160;
 /// Longest state property read, in bytes: every item's id at its longest, plus the commas.
@@ -108,8 +111,12 @@ pub struct Entry {
     pub level: Option<u8>,
     /// Index of the parent in the same outline.
     pub parent: Option<usize>,
-    /// On, and so printing (the parent rule already applied).
+    /// On, and so printing (the parent rule and the section's rules applied).
     pub on: bool,
+    /// Switched on by the author (stored in `Speccraft.On`).
+    pub manual: bool,
+    /// Turned on by a rule (M6), whether or not the author also switched it on.
+    pub linked: bool,
     pub range: ControlRange,
 }
 
@@ -117,12 +124,6 @@ pub struct Entry {
 fn section_para<'a>(doc: &'a Document, r: &ControlRange) -> Option<&'a Paragraph> {
     let whole = r.control.block && r.start.story == StoryRef::Body && r.start.path == r.end.path && r.start.path.0.len() == 1;
     if whole { doc.para_at(&r.start) } else { None }
-}
-
-/// Whether an item prints: it is switched on, is not a note, and its parent (if any) prints.
-/// This is the rule the PDF export uses.
-fn prints(kind: Kind, switched_on: bool, parent_prints: bool) -> bool {
-    switched_on && kind != Kind::Note && parent_prints
 }
 
 /// The ids the state property names (unknown ones are ignored by [`outline`]).
@@ -151,31 +152,67 @@ pub fn outline(doc: &Document) -> Vec<Entry> {
             }
             open.last().map(|(_, i)| *i)
         });
-        let parent_prints = parent.is_none_or(|p| out.get(p).is_some_and(|e| e.on));
-        let on = prints(kind, stored.contains(id.as_str()), parent_prints);
+        let manual = kind != Kind::Note && stored.contains(id.as_str());
         // A paragraph with no spec style is a leaf: if it became a parent, switching off one stray
         // paragraph would take every later Article of its Part with it.
         if let Some(l) = level.filter(|_| kind != Kind::Other) {
             open.push((l, out.len()));
         }
-        out.push(Entry { id, kind, level, parent, on, range });
+        out.push(Entry { id, kind, level, parent, on: false, manual, linked: false, range });
+    }
+    let manual: Vec<bool> = out.iter().map(|e| e.manual).collect();
+    let (on, linked) = super::rules::evaluate(doc, &out, &manual, &stored_overridden(doc));
+    for ((e, on), linked) in out.iter_mut().zip(on).zip(linked) {
+        e.on = on;
+        e.linked = linked;
     }
     out
+}
+
+/// The ids the overridden property names.
+pub fn stored_overridden(doc: &Document) -> HashSet<String> {
+    let v = doc.custom_prop(OVERRIDDEN_PROP).unwrap_or("");
+    let end = (0..=v.len().min(MAX_STATE)).rev().find(|i| v.is_char_boundary(*i)).unwrap_or(0);
+    v.get(..end).unwrap_or("").split(',').map(str::trim).filter(|id| !id.is_empty()).take(MAX_ITEMS).map(str::to_string).collect()
+}
+
+/// Write the overridden property: those still section paragraphs, in document order.
+fn write_overridden(doc: &mut Document, entries: &[Entry], overridden: &HashSet<String>) {
+    let mut seen = HashSet::new();
+    let ids: Vec<&str> = entries.iter().filter(|e| overridden.contains(&e.id) && seen.insert(e.id.as_str())).map(|e| e.id.as_str()).collect();
+    if ids.is_empty() {
+        doc.remove_custom_prop(OVERRIDDEN_PROP);
+    } else {
+        doc.set_custom_prop(OVERRIDDEN_PROP, &ids.join(","));
+    }
+}
+
+/// Apply the parent rule to what the author switched on: a paragraph whose parent doesn't print
+/// is switched off too. Returns what prints afterwards.
+fn tidy(doc: &Document, entries: &[Entry], manual: &mut [bool], overridden: &HashSet<String>) -> Vec<bool> {
+    for _ in 0..8 {
+        let (on, _) = super::rules::evaluate(doc, entries, manual, overridden);
+        let mut changed = false;
+        for (i, e) in entries.iter().enumerate() {
+            let parent_prints = e.parent.is_none_or(|p| on.get(p).copied().unwrap_or(false));
+            if let Some(m) = manual.get_mut(i)
+                && *m
+                && (!parent_prints || e.kind == Kind::Note)
+            {
+                *m = false;
+                changed = true;
+            }
+        }
+        if !changed {
+            return on;
+        }
+    }
+    super::rules::evaluate(doc, entries, manual, overridden).0
 }
 
 /// The paragraphs that print, in document order.
 pub fn printable(doc: &Document) -> Vec<Entry> {
     outline(doc).into_iter().filter(|e| e.on).collect()
-}
-
-/// Apply the parent rule to `on` (parents come before their children, so one pass is enough).
-fn settle(entries: &[Entry], on: &mut [bool]) {
-    for (i, e) in entries.iter().enumerate() {
-        let parent_prints = e.parent.is_none_or(|p| on.get(p).copied().unwrap_or(false));
-        if let Some(x) = on.get_mut(i) {
-            *x = prints(e.kind, *x, parent_prints);
-        }
-    }
 }
 
 /// Write the state property: the ids that are on, in document order, once each.
@@ -213,19 +250,26 @@ fn write_refused(doc: &mut Document, entries: &[Entry], on: &[bool], refused: &H
     }
 }
 
-/// Switch on refused items whose parent now prints (parents first, so chains come on in one
-/// pass) and take them off the refused list.
-fn release_refused(entries: &[Entry], on: &mut [bool], refused: &mut HashSet<String>) {
-    for (i, e) in entries.iter().enumerate() {
-        if !refused.contains(&e.id) || e.kind == Kind::Note {
-            continue;
-        }
-        let parent_prints = e.parent.is_none_or(|p| on.get(p).copied().unwrap_or(false));
-        if parent_prints {
-            if let Some(x) = on.get_mut(i) {
-                *x = true;
+/// Switch on refused items whose parent now prints and take them off the refused list (again
+/// until none is left, so chains come on).
+fn release_refused(doc: &Document, entries: &[Entry], manual: &mut [bool], overridden: &HashSet<String>, refused: &mut HashSet<String>) {
+    for _ in 0..16 {
+        let (on, _) = super::rules::evaluate(doc, entries, manual, overridden);
+        let mut changed = false;
+        for (i, e) in entries.iter().enumerate() {
+            if !refused.contains(&e.id) || e.kind == Kind::Note {
+                continue;
             }
-            refused.remove(&e.id);
+            if e.parent.is_none_or(|p| on.get(p).copied().unwrap_or(false)) {
+                if let Some(x) = manual.get_mut(i) {
+                    *x = true;
+                }
+                refused.remove(&e.id);
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
         }
     }
 }
@@ -234,8 +278,12 @@ fn release_refused(entries: &[Entry], on: &mut [bool], refused: &mut HashSet<Str
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     On,
+    /// On because a rule turned it on (M6).
+    Linked,
     Off,
     Refused,
+    /// Off because the author switched it off against a rule (M6).
+    Overridden,
     Note,
 }
 
@@ -243,7 +291,9 @@ impl State {
     pub fn name(self) -> &'static str {
         match self {
             State::On => "on",
+            State::Linked => "linked",
             State::Off => "off",
+            State::Overridden => "overridden",
             State::Refused => "refused",
             State::Note => "note",
         }
@@ -253,15 +303,20 @@ impl State {
 /// Every section paragraph with how it shows.
 pub fn states(doc: &Document) -> Vec<(Entry, State)> {
     let refused = stored_refused(doc);
+    let overridden = stored_overridden(doc);
     outline(doc)
         .into_iter()
         .map(|e| {
             let st = if e.kind == Kind::Note {
                 State::Note
+            } else if e.on && e.linked && !e.manual {
+                State::Linked
             } else if e.on {
                 State::On
             } else if refused.contains(&e.id) {
                 State::Refused
+            } else if overridden.contains(&e.id) {
+                State::Overridden
             } else {
                 State::Off
             };
@@ -324,6 +379,8 @@ fn activate(s: &mut Session, v: &Value) -> CmdResult {
     let entries = outline(&s.doc);
     let targets = targets(v, &entries)?;
     let mut on: Vec<bool> = entries.iter().map(|e| e.on).collect();
+    let mut manual: Vec<bool> = entries.iter().map(|e| e.manual).collect();
+    let mut overridden = stored_overridden(&s.doc);
     for i in targets {
         let Some(e) = entries.get(i) else { continue };
         if e.kind == Kind::Note {
@@ -335,13 +392,24 @@ fn activate(s: &mut Session, v: &Value) -> CmdResult {
             let parent = entries.get(p).map_or("?", |x| x.id.as_str());
             return Err(CmdError::Failed(format!("can't switch on {:?}: its parent paragraph {parent:?} is off", e.id)));
         }
+        if !e.on
+            && let Some(why) = super::rules::blocking(&s.doc, &entries, &on, i)
+        {
+            return Err(CmdError::Failed(format!("can't switch on {:?}: {why}", e.id)));
+        }
         if let Some(x) = on.get_mut(i) {
             *x = true;
         }
+        if let Some(x) = manual.get_mut(i) {
+            *x = true;
+        }
+        overridden.remove(&e.id);
     }
     let mut refused = stored_refused(&s.doc);
-    release_refused(&entries, &mut on, &mut refused);
-    write_state(&mut s.doc, &entries, &on);
+    release_refused(&s.doc, &entries, &mut manual, &overridden, &mut refused);
+    let on = tidy(&s.doc, &entries, &mut manual, &overridden);
+    write_state(&mut s.doc, &entries, &manual);
+    write_overridden(&mut s.doc, &entries, &overridden);
     write_refused(&mut s.doc, &entries, &on, &refused);
     Ok(change_result(&entries, &on))
 }
@@ -349,18 +417,30 @@ fn activate(s: &mut Session, v: &Value) -> CmdResult {
 /// Switch items off, and everything under them.
 fn deactivate(s: &mut Session, v: &Value) -> CmdResult {
     let entries = outline(&s.doc);
-    let mut on: Vec<bool> = entries.iter().map(|e| e.on).collect();
+    let mut manual: Vec<bool> = entries.iter().map(|e| e.manual).collect();
+    let mut overridden = stored_overridden(&s.doc);
     let mut refused = stored_refused(&s.doc);
-    for i in targets(v, &entries)? {
-        if let Some(x) = on.get_mut(i) {
+    let targets = targets(v, &entries)?;
+    for i in &targets {
+        if let Some(x) = manual.get_mut(*i) {
             *x = false;
         }
-        if let Some(e) = entries.get(i) {
+        if let Some(e) = entries.get(*i) {
             refused.remove(&e.id);
         }
     }
-    settle(&entries, &mut on);
-    write_state(&mut s.doc, &entries, &on);
+    // A paragraph a rule would keep on is overridden: the author has the last say.
+    let (still, _) = super::rules::evaluate(&s.doc, &entries, &manual, &overridden);
+    for i in &targets {
+        if still.get(*i).copied().unwrap_or(false)
+            && let Some(e) = entries.get(*i)
+        {
+            overridden.insert(e.id.clone());
+        }
+    }
+    let on = tidy(&s.doc, &entries, &mut manual, &overridden);
+    write_state(&mut s.doc, &entries, &manual);
+    write_overridden(&mut s.doc, &entries, &overridden);
     write_refused(&mut s.doc, &entries, &on, &refused);
     Ok(change_result(&entries, &on))
 }
@@ -388,6 +468,10 @@ fn toggle(s: &mut Session, v: &Value) -> CmdResult {
     if parent_prints {
         let r = activate(s, &json!({"id": id}))?;
         return Ok(json!({"id": id, "state": "on", "changed": r["changed"]}));
+    }
+    let on_now: Vec<bool> = entries.iter().map(|e| e.on).collect();
+    if let Some(why) = super::rules::blocking(&s.doc, &entries, &on_now, i) {
+        return Err(CmdError::Failed(format!("can't switch on {id:?}: {why}")));
     }
     refused.insert(id.clone());
     let on: Vec<bool> = entries.iter().map(|e| e.on).collect();
@@ -523,9 +607,10 @@ fn import(s: &mut Session, _v: &Value) -> CmdResult {
 
     let entries = outline(&s.doc);
     let fresh: HashSet<&str> = new_ids.iter().map(String::as_str).collect();
-    let mut on: Vec<bool> = entries.iter().map(|e| e.on || (fresh.contains(e.id.as_str()) && matches!(e.kind, Kind::Title | Kind::End))).collect();
-    settle(&entries, &mut on);
-    write_state(&mut s.doc, &entries, &on);
+    let mut manual: Vec<bool> =
+        entries.iter().map(|e| e.manual || (fresh.contains(e.id.as_str()) && matches!(e.kind, Kind::Title | Kind::End))).collect();
+    let on = tidy(&s.doc, &entries, &mut manual, &stored_overridden(&s.doc));
+    write_state(&mut s.doc, &entries, &manual);
     // The master's wording, recorded once at the first import (M8: origin and restore).
     super::edits::record_originals(&mut s.doc);
 

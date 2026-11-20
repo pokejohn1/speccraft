@@ -26,4 +26,5 @@ A failing case leaves its PDF beside this file as `<case>.failed.pdf` (ignored b
 | `door-hardware` | an item in a list, a related section, a PR3, the WARRANTY, EXIT DEVICES and HARDWARE SCHEDULE articles | numbering closes up at every level; notes never print; the finishes table prints under its paragraph |
 | `joint-sealants` | a PR2, WARRANTY, a PR4 (its PR5 goes too), URETHANE article (with the hidden paragraph), the paragraph above the schedule table | the table leaves with its paragraph; the landscape page survives although its section break was on a note |
 | `joint-sealants-stray` | the stray unstyled paragraph | the Articles after it still print |
+| `door-hardware-rules` | the related section, a PR3, WARRANTY, EXIT DEVICES, HARDWARE SCHEDULE; then a rule "door closers on requires rim exit devices" | the rule brings the rim exit device paragraph and its article back; the concealed rod paragraph stays off |
 | `joint-sealants-fields` | WARRANTY, a PR4, URETHANE article; then fill-ins found, the temperature blank set to 40, the colour choice set to "Match adjacent surface" | chosen and typed values print; open fill-ins print as written |

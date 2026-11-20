@@ -18,6 +18,7 @@ pub mod edits;
 pub mod fields;
 pub mod output;
 pub mod project;
+pub mod rules;
 pub mod sections;
 
 const LOC: &str = "Specs › Items";
@@ -43,6 +44,7 @@ pub fn specs() -> Vec<CommandSpec> {
     v.extend(fields::specs());
     v.extend(output::specs());
     v.extend(project::specs());
+    v.extend(rules::specs());
     v
 }
 

@@ -71,6 +71,12 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("spec.project.requires", "Set Required Sections", LOC, requires)
             .params(r#"{"path": string (the project's .speccraft file), "file": string, "requires": [string] (section numbers, e.g. "07 9200")}"#)
             .pure(),
+        CommandSpec::new("spec.project.addRule", "Add Rule Between Sections", LOC, add_rule)
+            .params(r#"{"path": string (the project's .speccraft file), "kind": "require"|"recommend"|"warn"|"exclude", "if": [{"section": "09 2900", "on"?: id} | {"value": name, "is"?: string}], "target": {"section": "07 9200", "on"?: id}, "note"?: string}"#)
+            .pure(),
+        CommandSpec::new("spec.project.removeRule", "Remove Rule Between Sections", LOC, remove_rule)
+            .params(r#"{"path": string (the project's .speccraft file), "id": string}"#)
+            .pure(),
         CommandSpec::new("spec.project.validate", "Check Project", LOC, validate).params(r#"{"path": string (the project's .speccraft file)}"#).pure(),
         CommandSpec::new("spec.project.publish", "Publish Project Sections", LOC, publish)
             .params(r#"{"path": string (the project's .speccraft file), "folder"?: string (default: Published beside the project file)}"#)
@@ -93,8 +99,39 @@ pub struct ProjectFile {
     pub values: BTreeMap<String, String>,
     #[serde(default)]
     pub sections: Vec<SectionRef>,
+    /// Rules between sections (M6), checked by `spec.project.validate`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<ProjectRule>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// A condition or target of a rule between sections: a section (by number) is in the project,
+/// optionally with one of its paragraphs printing; or a project value equals something.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
+    /// A paragraph id in that section that must print.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<String>,
+    /// A project value's name (or "Project Name", "Issue", …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is: Option<String>,
+}
+
+/// A rule between sections: the same kinds as a section's rules.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRule {
+    pub id: String,
+    pub kind: super::rules::RuleKind,
+    #[serde(rename = "if")]
+    pub when: Vec<ProjectRef>,
+    pub target: ProjectRef,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 /// Project-wide information.
@@ -504,6 +541,7 @@ fn summary(path: &Path, f: &ProjectFile) -> Value {
         "date": f.project.date,
         "values": f.values,
         "sections": sections,
+        "rules": f.rules,
     })
 }
 
@@ -727,6 +765,107 @@ fn referenced_sections(text: &str) -> Vec<String> {
     out
 }
 
+fn add_rule(_: &mut Session, v: &Value) -> CmdResult {
+    let path = project_path(v)?;
+    let mut f = load(&path)?;
+    let bad = || CmdError::Params("a rule needs `kind`, `if` (1 to 20 conditions) and `target` (a section)".into());
+    let kind: super::rules::RuleKind = serde_json::from_value(v.get("kind").cloned().unwrap_or(Value::Null)).map_err(|_| bad())?;
+    let when: Vec<ProjectRef> = serde_json::from_value(v.get("if").cloned().unwrap_or(Value::Null)).map_err(|_| bad())?;
+    let target: ProjectRef = serde_json::from_value(v.get("target").cloned().unwrap_or(Value::Null)).map_err(|_| bad())?;
+    if when.is_empty() || when.len() > 20 || f.rules.len() >= 2_000 {
+        return Err(bad());
+    }
+    for c in when.iter().chain(std::iter::once(&target)) {
+        let ok = match (&c.section, &c.value) {
+            (Some(sec), None) => !number_key(sec).is_empty() && c.is.is_none(),
+            (None, Some(name)) => !name.trim().is_empty() && c.on.is_none(),
+            _ => false,
+        };
+        if !ok {
+            return Err(CmdError::Params(
+                "each condition is a section number (with an optional paragraph `on`) or a project `value` (with an optional `is`)".into(),
+            ));
+        }
+    }
+    if target.section.is_none() {
+        return Err(CmdError::Params("the target must be a section (with an optional paragraph `on`)".into()));
+    }
+    let note = p::str(v, "note").unwrap_or("").trim().chars().take(500).collect::<String>();
+    let next = f.rules.iter().filter_map(|r| r.id.strip_prefix('R').and_then(|n| n.parse::<u32>().ok())).max().unwrap_or(0).saturating_add(1);
+    let rule = ProjectRule { id: format!("R{next:03}"), kind, when, target, note };
+    f.rules.push(rule.clone());
+    store(&path, &f)?;
+    Ok(json!({"added": rule.id, "rules": f.rules}))
+}
+
+fn remove_rule(_: &mut Session, v: &Value) -> CmdResult {
+    let path = project_path(v)?;
+    let mut f = load(&path)?;
+    let id = p::req_str(v, "id")?.trim().to_string();
+    let n = f.rules.len();
+    f.rules.retain(|r| r.id != id);
+    if f.rules.len() == n {
+        return Err(CmdError::Failed(format!("no rule called {id:?}")));
+    }
+    store(&path, &f)?;
+    Ok(json!({"removed": id, "rules": f.rules}))
+}
+
+/// Findings of the rules between sections, given what is in the project and what prints.
+fn check_project_rules(
+    f: &ProjectFile,
+    values: &BTreeMap<String, String>,
+    have: &BTreeSet<String>,
+    printing_by_number: &BTreeMap<String, std::collections::HashSet<String>>,
+    out: &mut Vec<Value>,
+) {
+    let holds = |r: &ProjectRef| -> bool {
+        if let Some(name) = &r.value {
+            let v = values.get(&name.trim().to_lowercase()).map(|v| v.trim().to_string()).unwrap_or_default();
+            return match &r.is {
+                Some(want) => v.eq_ignore_ascii_case(want.trim()),
+                None => !v.is_empty(),
+            };
+        }
+        let Some(sec) = &r.section else { return false };
+        let key = number_key(sec);
+        if !have.contains(&key) {
+            return false;
+        }
+        match &r.on {
+            Some(id) => printing_by_number.get(&key).is_some_and(|p| p.contains(id)),
+            None => true,
+        }
+    };
+    let describe = |r: &ProjectRef| match (&r.section, &r.on, &r.value, &r.is) {
+        (Some(sec), Some(id), _, _) => format!("{id} of Section {sec}"),
+        (Some(sec), None, _, _) => format!("Section {sec}"),
+        (_, _, Some(v), Some(is)) => format!("{v} = {is}"),
+        (_, _, Some(v), None) => v.clone(),
+        _ => "?".into(),
+    };
+    for r in &f.rules {
+        if r.when.is_empty() || !r.when.iter().all(holds) {
+            continue;
+        }
+        let because = r.when.iter().map(describe).collect::<Vec<_>>().join(" and ");
+        let note = if r.note.is_empty() { String::new() } else { format!(" ({})", r.note) };
+        let target = describe(&r.target);
+        let present = holds(&r.target);
+        use super::rules::RuleKind;
+        let found = match (r.kind, present) {
+            (RuleKind::Require, false) => Some(("error", format!("rule {}: {because}, so {target} is required{note}", r.id))),
+            (RuleKind::Recommend, false) => Some(("notice", format!("rule {}: {because}, so {target} is recommended{note}", r.id))),
+            (RuleKind::Warn, true) => Some(("warning", format!("rule {}: {target} is in, but {because}{note}", r.id))),
+            (RuleKind::Exclude, true) => Some(("error", format!("rule {}: {target} must not be in while {because}{note}", r.id))),
+            _ => None,
+        };
+        if let Some((sev, m)) = found {
+            out.push(json!({"severity": sev, "code": "rule", "rule": r.id, "file": Value::Null, "message": m}));
+        }
+    }
+}
+
 fn validate(_: &mut Session, v: &Value) -> CmdResult {
     let path = project_path(v)?;
     let f = load(&path)?;
@@ -747,6 +886,8 @@ fn validate(_: &mut Session, v: &Value) -> CmdResult {
         }
     }
     let have: BTreeSet<String> = by_number.keys().filter(|k| !k.is_empty()).cloned().collect();
+    // What prints in each included section, by section number (for rules between sections).
+    let mut printing_by_number: BTreeMap<String, std::collections::HashSet<String>> = BTreeMap::new();
     for s in &included {
         let file = Some(s.file.as_str());
         for r in &s.requires {
@@ -766,6 +907,16 @@ fn validate(_: &mut Session, v: &Value) -> CmdResult {
             out.push(finding("warning", "noNumber", file, "no section number found in the section title".into()));
         }
         let entries = sections::outline(&doc);
+        printing_by_number.insert(number_key(&s.number), entries.iter().filter(|e| e.on).map(|e| e.id.clone()).collect());
+        // The section's own rules: conflicts, overrides, problems.
+        let mut probe = Session::new(doc.clone());
+        if let Ok(r) = probe.run("spec.rules.check", &json!({})) {
+            for x in r.get("findings").and_then(Value::as_array).into_iter().flatten() {
+                let sev = x.get("severity").and_then(Value::as_str).unwrap_or("notice");
+                let m = x.get("message").and_then(Value::as_str).unwrap_or("");
+                out.push(finding(sev, "sectionRule", file, m.to_string()));
+            }
+        }
         if entries.is_empty() {
             out.push(finding("warning", "notImported", file, "no spec paragraphs yet: open it and import it".into()));
             continue;
@@ -829,6 +980,7 @@ fn validate(_: &mut Session, v: &Value) -> CmdResult {
             out.push(finding("notice", "masterChanged", file, format!("the master {} has changed since this copy was made", m.path)));
         }
     }
+    check_project_rules(&f, &values, &have, &printing_by_number, &mut out);
     let count = |sev: &str| out.iter().filter(|x| x["severity"] == sev).count();
     Ok(json!({"errors": count("error"), "warnings": count("warning"), "notices": count("notice"), "findings": out}))
 }
@@ -1078,6 +1230,52 @@ mod tests {
         let r = s.run("spec.exportPdf", &json!({"path": dir.join("out.pdf").to_string_lossy()})).unwrap();
         assert_eq!(r["placeholdersFilled"], 2, "{r}");
         assert!(all_paragraphs(&s.doc).iter().any(|p| p.text.contains("<Insert Project Name>")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rules_between_sections_are_checked() {
+        let dir = scratch("rules");
+        let project = dir.join("project").join("Riverside.speccraft");
+        let path = project.to_string_lossy().to_string();
+        run("spec.project.new", json!({"path": path, "name": "Riverside Library"}));
+        let m = dir.join("masters").join("gypsum.docx");
+        save(&master("09 2900", "GYPSUM BOARD"), &m);
+        run("spec.project.addSection", json!({"path": path, "master": m.to_string_lossy()}));
+        // Gypsum board's GENERAL Part (p0002) needs joint sealants; LEED needs a recycled-content paragraph.
+        run(
+            "spec.project.addRule",
+            json!({"path": path, "kind": "require", "if": [{"section": "09 2900", "on": "p0002"}], "target": {"section": "07 9200"}, "note": "sealant at board joints"}),
+        );
+        run(
+            "spec.project.addRule",
+            json!({"path": path, "kind": "require", "if": [{"value": "LEED", "is": "yes"}], "target": {"section": "09 2900", "on": "p0004"}}),
+        );
+        run("spec.project.addRule", json!({"path": path, "kind": "exclude", "if": [{"section": "09 2900"}], "target": {"section": "09 2116"}}));
+        assert!(
+            fails(
+                "spec.project.addRule",
+                json!({"path": path, "kind": "require", "if": [{"value": "LEED", "on": "p0001"}], "target": {"section": "07 9200"}})
+            )
+            .contains("each condition")
+        );
+        let rule_findings = |path: &str| -> Vec<String> {
+            let r = run("spec.project.validate", json!({"path": path}));
+            r["findings"].as_array().unwrap().iter().filter(|f| f["code"] == "rule").map(|f| f["message"].as_str().unwrap().to_string()).collect()
+        };
+        assert!(rule_findings(&path).is_empty(), "GENERAL is off and LEED isn't set: nothing applies");
+        let g = dir.join("project").join("gypsum.docx");
+        let mut s = Session::new(crate::io::open_path(&g).unwrap());
+        s.run("spec.activate", &json!({"ids": ["p0002", "p0003", "p0004"]})).unwrap();
+        s.run("spec.deactivate", &json!({"id": "p0004"})).unwrap();
+        crate::io::save_path(&g, &s.doc).unwrap();
+        run("spec.project.set", json!({"path": path, "values": {"LEED": "yes"}}));
+        let found = rule_findings(&path);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0].contains("R001: p0002 of Section 09 2900, so Section 07 9200 is required (sealant at board joints)"), "{found:?}");
+        assert!(found[1].contains("R002: LEED = yes, so p0004 of Section 09 2900 is required"), "{found:?}");
+        run("spec.project.removeRule", json!({"path": path, "id": "R001"}));
+        assert_eq!(rule_findings(&path).len(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

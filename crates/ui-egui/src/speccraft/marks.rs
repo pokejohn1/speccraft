@@ -11,6 +11,7 @@ use egui::{Color32, Painter, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use serde_json::json;
 use wordcraft_engine::cmd::spec::edits::{self, Origin};
 use wordcraft_engine::cmd::spec::fields::{self, FieldState};
+use wordcraft_engine::cmd::spec::rules::{self, Standing};
 use wordcraft_engine::cmd::spec::sections::{self, State};
 use wordcraft_layout::DocLayout;
 
@@ -24,6 +25,8 @@ pub(crate) struct Marked {
     pub state: State,
     /// Reworded (`modified`) or written (`added`) in this project.
     pub origin: Origin,
+    /// What the section's rules say about it now: a recommendation not followed, or a conflict.
+    pub advice: Option<Standing>,
     pub level: u8,
     pub pieces: Vec<(usize, wordcraft_geom::Rect)>,
 }
@@ -56,13 +59,23 @@ pub(crate) fn marked(app: &mut WordApp, layout: &Arc<DocLayout>) -> Arc<Vec<Mark
     let doc = &app.session.doc;
     let hint = app.session.page_hint;
     let (origins, _) = edits::origins(doc);
+    let mut advice: std::collections::HashMap<String, Standing> = std::collections::HashMap::new();
+    for (r, st) in rules::standings(doc) {
+        if matches!(st, Standing::Suggested | Standing::Conflict) {
+            let worse = advice.get(&r.target).is_none_or(|old| *old != Standing::Conflict);
+            if worse {
+                advice.insert(r.target.clone(), st);
+            }
+        }
+    }
     let origin_of: std::collections::HashMap<String, Origin> = origins.into_iter().map(|(e, o)| (e.id, o)).collect();
     let items: Vec<Marked> = sections::states(doc)
         .into_iter()
         .map(|(e, state)| {
             let pieces = layout.selection_rects(doc, &e.range.start, &e.range.end, hint);
             let origin = origin_of.get(&e.id).copied().unwrap_or(Origin::Master);
-            Marked { id: e.id, state, origin, level: e.level.unwrap_or(1), pieces }
+            let advice = advice.get(&e.id).copied();
+            Marked { id: e.id, state, origin, advice, level: e.level.unwrap_or(1), pieces }
         })
         .collect();
     let marked_fields: Vec<MarkedField> = fields::fields(doc)
@@ -83,6 +96,8 @@ fn marked_fields(app: &WordApp) -> Arc<Vec<MarkedField>> {
 fn colors(t: &Tokens, state: State) -> (Color32, Color32) {
     match state {
         State::On => (t.accent, t.accent),
+        State::Linked => (t.green, t.green),
+        State::Overridden => (Color32::TRANSPARENT, t.red),
         State::Off | State::Refused => (Color32::TRANSPARENT, t.text_disabled),
         State::Note => (Color32::TRANSPARENT, t.text_dim),
     }
@@ -92,6 +107,8 @@ fn colors(t: &Tokens, state: State) -> (Color32, Color32) {
 pub(crate) fn describe(state: State) -> &'static str {
     match state {
         State::On => "On: prints. Click to switch off.",
+        State::Linked => "On because a rule turned it on: prints. Click to switch it off anyway.",
+        State::Overridden => "Off: you switched it off although a rule turned it on. Click to switch it on.",
         State::Off => "Off: doesn't print. Click to switch on.",
         State::Refused => "Wanted, but its parent is off: it prints once the parent is switched on. Click to clear.",
         State::Note => "Author note: never prints.",
@@ -153,7 +170,7 @@ pub(crate) fn paint(app: &mut WordApp, ui: &mut Ui, painter: &Painter, rects: &[
             }
             // A wash over what won't print, so it reads as greyed.
             match m.state {
-                State::Off | State::Refused => {
+                State::Off | State::Refused | State::Overridden => {
                     let wash = if t.dark { Color32::from_black_alpha(130) } else { Color32::from_white_alpha(150) };
                     painter.rect_filled(area.expand(1.0), 0.0, wash);
                 }
@@ -161,7 +178,7 @@ pub(crate) fn paint(app: &mut WordApp, ui: &mut Ui, painter: &Painter, rects: &[
                     let bar = Rect::from_min_max(pos2(area.min.x - 6.0, area.min.y), pos2(area.min.x - 4.0, area.max.y));
                     painter.rect_filled(bar, 0.0, t.text_dim.gamma_multiply(0.5));
                 }
-                State::On => {}
+                State::On | State::Linked => {}
             }
             // The mark sits in the page's left margin, level by level, on the paragraph's first line.
             let Some(pr) = rects.get(*pi) else { continue };
@@ -185,6 +202,17 @@ pub(crate) fn paint(app: &mut WordApp, ui: &mut Ui, painter: &Painter, rects: &[
             }
             if m.state == State::Refused {
                 painter.circle_filled(mark.center(), size * 0.22, t.blue);
+            }
+            if m.state == State::Overridden {
+                let k = mark.shrink(size * 0.22);
+                painter.line_segment([k.left_top(), k.right_bottom()], Stroke::new(1.3, t.red));
+                painter.line_segment([k.right_top(), k.left_bottom()], Stroke::new(1.3, t.red));
+            }
+            // What the rules say: a bar before the mark, yellow for a recommendation, red for a conflict.
+            if let Some(a) = m.advice {
+                let color = if a == Standing::Conflict { t.red } else { t.orange };
+                let bar = Rect::from_min_max(pos2(mark.min.x - 4.0, mark.min.y), pos2(mark.min.x - 2.0, mark.max.y));
+                painter.rect_filled(bar, 0.0, color);
             }
             // Origin, beside the mark: * reworded, + written in this project.
             let tag = match m.origin {

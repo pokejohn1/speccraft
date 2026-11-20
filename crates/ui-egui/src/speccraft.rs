@@ -19,6 +19,7 @@ use crate::widgets::{big, big_toggle, group};
 
 pub(crate) mod marks;
 pub(crate) mod outline;
+pub(crate) mod rules_view;
 
 /// What the Specs tab and Sections pane keep between frames.
 #[derive(Default)]
@@ -46,6 +47,10 @@ pub struct SpecUi {
     pub(crate) outline_cache: Option<((u64, u64), Value)>,
     pub(crate) fields_cache: Option<((u64, u64), Value)>,
     pub(crate) origin_cache: Option<((u64, u64), Value)>,
+    pub(crate) rules_cache: Option<((u64, u64), Value)>,
+    pub(crate) why_cache: Option<((u64, u64, String), Vec<String>)>,
+    /// The Rules view's new-rule form.
+    pub(crate) rule_form: rules_view::RuleForm,
     /// The Fill-ins view: filters, and text typed but not yet set, by field id.
     pub(crate) open_only: bool,
     pub(crate) printing_only: bool,
@@ -91,6 +96,7 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
                 app.speccraft.view = match v.as_str() {
                     "printed" => outline::View::Printed,
                     "fields" => outline::View::Fields,
+                    "rules" => outline::View::Rules,
                     _ => outline::View::Outline,
                 };
             }
@@ -308,6 +314,7 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
         let shown = !app.speccraft.hide_marks;
         big_toggle(ui, app, "pilcrow", "Show\nMarks", "ui.spec.marks", shown);
         big(ui, app, "ccComboBox", "Fill-ins", "ui.spec.outlinePane", json!({"value": true, "view": "fields"}), false);
+        big(ui, app, "link", "Rules", "ui.spec.outlinePane", json!({"value": true, "view": "rules"}), false);
         big(ui, app, "readMode", "Printed\nView", "ui.spec.outlinePane", json!({"value": true, "view": "printed"}), false);
         big(ui, app, "export", "Export\nPDF", "spec.exportPdf", json!({}), false);
     });
@@ -821,6 +828,40 @@ mod tests {
         // Restore through the command the panel's button runs.
         a.run("spec.restore", json!({"id": "p0005"})).unwrap();
         assert_eq!(outline::origins(&mut a)["counts"], json!({"added": 1, "master": 6}));
+    }
+
+    #[test]
+    fn rules_show_on_the_page_and_in_the_rules_view() {
+        let mut a = imported_app();
+        // SUMMARY (p0003) on requires "Section includes" (p0005); a recommendation on GENERAL.
+        a.run("spec.rules.add", json!({"kind": "require", "if": [{"on": "p0003"}], "target": "p0005"})).unwrap();
+        a.run("spec.rules.add", json!({"kind": "recommend", "if": [{"on": "p0002"}], "target": "p0003"})).unwrap();
+        a.run("spec.activate", json!({"id": "p0002"})).unwrap();
+        let layout = a.session.layout();
+        let marks = marks::marked(&mut a, &layout);
+        use wordcraft_engine::cmd::spec::rules::Standing;
+        assert_eq!(marks.iter().find(|m| m.id == "p0003").unwrap().advice, Some(Standing::Suggested));
+        a.run("spec.activate", json!({"id": "p0003"})).unwrap();
+        let layout = a.session.layout();
+        let marks = marks::marked(&mut a, &layout);
+        use wordcraft_engine::cmd::spec::sections::State;
+        assert_eq!(marks.iter().find(|m| m.id == "p0005").unwrap().state, State::Linked);
+        a.run("spec.toggle", json!({"id": "p0005"})).unwrap();
+        let layout = a.session.layout();
+        let marks = marks::marked(&mut a, &layout);
+        assert_eq!(marks.iter().find(|m| m.id == "p0005").unwrap().state, State::Overridden);
+        // The Rules view and the outline details draw.
+        a.run("ui.spec.outlinePane", json!({"value": true, "view": "rules"})).unwrap();
+        assert_eq!(rules_view::rule_list(&mut a)["count"], 2);
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        for view in [outline::View::Rules, outline::View::Outline] {
+            a.speccraft.view = view;
+            let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                egui::Panel::right("rules_test").default_size(320.0).show(ui, |ui| outline::pane(&mut a, ui));
+            });
+            out.drop_without_applying_deltas();
+        }
     }
 
     #[test]

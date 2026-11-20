@@ -32,6 +32,10 @@ CASES = [
     # Fill-ins (M7): a blank typed, a choice made, the rest left open and printed as written.
     ("joint-sealants-fields", "079200 Joint Sealants.docx", ["p0028", "p0041", "p0044"],
      ["spec.fields.detect", 'spec.fields.set={"id": "f0001", "value": "40"}', 'spec.fields.set={"id": "f0004", "option": 1}']),
+    # Rules (M6): EXIT DEVICES is switched off, but a rule (door closers on -> rim exit devices) brings
+    # the rim exit device paragraph and its article back; the concealed rod paragraph stays off.
+    ("door-hardware-rules", "087100 Door Hardware.docx", ["p0013", "p0021", "p0033", "p0051", "p0073"],
+     ['spec.rules.add={"kind": "require", "if": [{"on": "p0009"}], "target": "p0052"}']),
 ]
 FURNITURE = re.compile(r"^(<Insert Project Name>.*|Speccraft test master: .*)$")
 
