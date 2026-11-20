@@ -17,6 +17,8 @@ pub(crate) enum Filter {
     Printing,
     Off,
     Notes,
+    /// Reworded or added in this project.
+    Changed,
 }
 
 impl Filter {
@@ -26,10 +28,12 @@ impl Filter {
             Filter::Printing => "Printing",
             Filter::Off => "Off and refused",
             Filter::Notes => "Notes",
+            Filter::Changed => "Changed from master",
         }
     }
-    fn keeps(self, state: &str) -> bool {
+    fn keeps(self, state: &str, origin: &str) -> bool {
         match self {
+            Filter::Changed => origin == "modified" || origin == "added",
             Filter::All => true,
             Filter::Printing => state == "on",
             Filter::Off => state == "off" || state == "refused",
@@ -125,7 +129,7 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     );
     ui.horizontal(|ui| {
         craft_ui::ComboBox::from_id_salt("spec_outline_filter").selected_text(tl!(app.speccraft.filter.label())).show_ui(ui, |ui| {
-            for f in [Filter::All, Filter::Printing, Filter::Off, Filter::Notes] {
+            for f in [Filter::All, Filter::Printing, Filter::Off, Filter::Notes, Filter::Changed] {
                 ui.selectable_value(&mut app.speccraft.filter, f, tl!(f.label()));
             }
         });
@@ -133,17 +137,23 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     ui.add(egui::TextEdit::singleline(&mut app.speccraft.search).hint_text(tl!("Search paragraphs")).desired_width(f32::INFINITY));
     ui.add_space(4.0);
     let caret = o.get("caret").and_then(Value::as_str).map(str::to_string);
+    let origin_v = origins(app);
+    let origin = origin_map(&origin_v);
+    let removed: Vec<Value> = origin_v.get("removed").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut restore: Option<String> = None;
     let needle = app.speccraft.search.trim().to_lowercase();
     let filter = app.speccraft.filter;
     let mut toggle: Option<String> = None;
     let mut goto: Option<u64> = None;
-    let detail_h = 120.0;
+    // Room for the details of the paragraph at the caret (its wording and buttons).
+    let detail_h = 230.0;
     let list_h = (ui.available_height() - detail_h).max(120.0);
     egui::ScrollArea::vertical().id_salt("spec_outline_list").max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
         for it in &items {
             let s = |k: &str| it.get(k).and_then(Value::as_str).unwrap_or("");
             let state = s("state");
-            if !filter.keeps(state) || (!needle.is_empty() && !s("text").to_lowercase().contains(&needle)) {
+            let org = origin.get(s("id")).map_or("master", |(o, _)| o.as_str());
+            if !filter.keeps(state, org) || (!needle.is_empty() && !s("text").to_lowercase().contains(&needle)) {
                 continue;
             }
             let level = it.get("level").and_then(Value::as_u64).unwrap_or(1) as f32;
@@ -172,6 +182,15 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
                     State::Note => text.italics().color(t.text_dim),
                     _ => text.color(t.text_disabled),
                 };
+                match org {
+                    "modified" => {
+                        ui.label(RichText::new("M*").small().color(t.orange)).on_hover_text(tl!("Reworded in this project"));
+                    }
+                    "added" => {
+                        ui.label(RichText::new("U").small().color(t.accent)).on_hover_text(tl!("Written in this project"));
+                    }
+                    _ => {}
+                }
                 let resp = ui.add(egui::Button::selectable(here, text).frame_when_inactive(false).truncate());
                 if resp.clicked() {
                     goto = it.get("block").and_then(Value::as_u64);
@@ -179,8 +198,32 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
             });
         }
     });
+    if !removed.is_empty() {
+        ui.separator();
+        egui::CollapsingHeader::new(
+            RichText::new(crate::i18n::fmt(tl!("Deleted master paragraphs ({n})"), &[("n", &removed.len().to_string())])).small(),
+        )
+        .id_salt("spec_removed")
+        .show(ui, |ui| {
+            for r in &removed {
+                let id = r.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                let text: String = r.get("text").and_then(Value::as_str).unwrap_or("").chars().take(60).collect();
+                ui.horizontal(|ui| {
+                    if ui.small_button(tl!("Restore")).clicked() {
+                        restore = Some(id.clone());
+                    }
+                    ui.label(RichText::new(text).small().color(t.text_dim));
+                });
+            }
+        });
+    }
     ui.separator();
-    details(app, ui, &items, caret.as_deref());
+    details(app, ui, &items, caret.as_deref(), &origin);
+    if let Some(id) = restore
+        && let Err(e) = app.run("spec.restore", json!({"id": id}))
+    {
+        app.status(e);
+    }
     if let Some(id) = toggle {
         match app.run("spec.toggle", json!({"id": id})) {
             Ok(r) if r["state"] == "refused" => app.status(tl!("Its parent is off: it will print once the parent is switched on")),
@@ -191,6 +234,37 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     if let Some(b) = goto {
         go_to(app, b);
     }
+}
+
+/// `spec.origin` for the document on screen, cached per revision: each paragraph's origin by
+/// id, and the deleted master paragraphs.
+pub(crate) fn origins(app: &mut WordApp) -> Value {
+    let key = (app.session.document_id(), app.session.rev());
+    if let Some((k, v)) = &app.speccraft.origin_cache
+        && *k == key
+    {
+        return v.clone();
+    }
+    let v = app.session.run("spec.origin", &json!({})).unwrap_or(Value::Null);
+    app.speccraft.origin_cache = Some((key, v.clone()));
+    v
+}
+
+/// The origin of each paragraph, by id.
+fn origin_map(o: &Value) -> std::collections::HashMap<String, (String, String)> {
+    o.get("items")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|i| {
+                    let id = i.get("id")?.as_str()?.to_string();
+                    let origin = i.get("origin")?.as_str()?.to_string();
+                    let original = i.get("original").and_then(Value::as_str).unwrap_or("").to_string();
+                    Some((id, (origin, original)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// `spec.fields.list` for the document on screen, cached per revision.
@@ -327,7 +401,7 @@ fn fill_ins(app: &mut WordApp, ui: &mut Ui) {
 }
 
 /// What the paragraph at the caret is.
-fn details(app: &mut WordApp, ui: &mut Ui, items: &[Value], caret: Option<&str>) {
+fn details(app: &mut WordApp, ui: &mut Ui, items: &[Value], caret: Option<&str>, origin: &std::collections::HashMap<String, (String, String)>) {
     let t = Tokens::get(ui.ctx());
     let Some(it) = caret.and_then(|c| items.iter().find(|i| i["id"] == c)) else {
         ui.label(RichText::new(tl!("Put the caret in a spec paragraph to see it here.")).small().color(t.text_dim));
@@ -360,9 +434,42 @@ fn details(app: &mut WordApp, ui: &mut Ui, items: &[Value], caret: Option<&str>)
     if children > 0 {
         ui.label(RichText::new(crate::i18n::fmt(tl!("{n} paragraphs under it"), &[("n", &children.to_string())])).small().color(t.text_dim));
     }
-    ui.label(RichText::new(id).small().monospace().color(t.text_disabled));
-    if state != State::Note && ui.small_button(tl!("Switch On or Off")).clicked() {
-        let _ = app.run("spec.toggle", json!({}));
+    let (org, original) = origin.get(&id).cloned().unwrap_or_else(|| ("master".into(), String::new()));
+    let org_text = match org.as_str() {
+        "modified" => tl!("Reworded in this project (M*)"),
+        "added" => tl!("Written in this project (U)"),
+        _ => tl!("Master wording"),
+    };
+    ui.label(RichText::new(format!("{org_text} · {id}")).small().color(t.text_disabled));
+    if org == "modified" && !original.is_empty() {
+        ui.label(RichText::new(tl!("The master says:")).small().color(t.text_dim));
+        ui.label(RichText::new(&original).small().italics());
+    }
+    let mut cmd: Option<(&str, Value)> = None;
+    ui.horizontal_wrapped(|ui| {
+        if state != State::Note && ui.small_button(tl!("Switch On or Off")).clicked() {
+            cmd = Some(("spec.toggle", json!({})));
+        }
+        if org == "modified" && ui.small_button(tl!("Restore Master Wording")).clicked() {
+            cmd = Some(("spec.restore", json!({})));
+        }
+        if ui.small_button(tl!("Duplicate")).clicked() {
+            cmd = Some(("spec.duplicate", json!({})));
+        }
+        if ui.small_button(tl!("Add After")).clicked() {
+            cmd = Some(("spec.addParagraph", json!({})));
+        }
+        if ui.small_button(tl!("Add Under")).clicked() {
+            cmd = Some(("spec.addParagraph", json!({"child": true})));
+        }
+        if org == "added" && ui.small_button(tl!("Remove")).clicked() {
+            cmd = Some(("spec.removeParagraph", json!({})));
+        }
+    });
+    if let Some((id, params)) = cmd
+        && let Err(e) = app.run(id, params)
+    {
+        app.status(e);
     }
 }
 

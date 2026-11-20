@@ -14,6 +14,7 @@ use wordcraft_doc::{Document, Pos, StoryRef};
 use super::{controls, pos_json};
 use crate::{CmdError, CmdResult, CommandSpec, Selection, Session, p};
 
+pub mod edits;
 pub mod fields;
 pub mod output;
 pub mod project;
@@ -38,6 +39,7 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("spec.set", "Set Spec Item Text", LOC, set).params(r#"{"id": string, "text": string}"#),
     ];
     v.extend(sections::specs());
+    v.extend(edits::specs());
     v.extend(fields::specs());
     v.extend(output::specs());
     v.extend(project::specs());

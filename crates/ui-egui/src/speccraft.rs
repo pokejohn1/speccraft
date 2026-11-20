@@ -45,6 +45,7 @@ pub struct SpecUi {
     pub(crate) marks_cache: Option<marks::MarksCache>,
     pub(crate) outline_cache: Option<((u64, u64), Value)>,
     pub(crate) fields_cache: Option<((u64, u64), Value)>,
+    pub(crate) origin_cache: Option<((u64, u64), Value)>,
     /// The Fill-ins view: filters, and text typed but not yet set, by field id.
     pub(crate) open_only: bool,
     pub(crate) printing_only: bool,
@@ -309,6 +310,11 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
         big(ui, app, "ccComboBox", "Fill-ins", "ui.spec.outlinePane", json!({"value": true, "view": "fields"}), false);
         big(ui, app, "readMode", "Printed\nView", "ui.spec.outlinePane", json!({"value": true, "view": "printed"}), false);
         big(ui, app, "export", "Export\nPDF", "spec.exportPdf", json!({}), false);
+    });
+    group(ui, "Edits", None, app, |ui, app| {
+        big(ui, app, "plus", "Add\nParagraph", "spec.addParagraph", json!({}), false);
+        big(ui, app, "copy", "Duplicate", "spec.duplicate", json!({}), false);
+        big(ui, app, "recover", "Restore\nWording", "spec.restore", json!({}), false);
     });
 }
 
@@ -786,6 +792,35 @@ mod tests {
         // Setting a choice shows in the list.
         a.run("spec.fields.set", json!({"id": "f0001", "option": 1})).unwrap();
         assert_eq!(outline::field_list(&mut a)["fields"][0]["value"], "5/8 inch");
+    }
+
+    #[test]
+    fn edits_show_their_origin_in_the_outline_and_on_the_page() {
+        let mut a = imported_app();
+        // Reword p0005, add a paragraph after it.
+        let at = wordcraft_doc::Pos::new(wordcraft_doc::StoryRef::Body, wordcraft_doc::Path(vec![4]), wordcraft_doc::para::OBJ.len_utf8());
+        a.run("caret.set", json!({"pos": wordcraft_engine::cmd::pos_json(&at)})).unwrap();
+        a.run("text.insert", json!({"text": "This "})).unwrap();
+        a.run("spec.addParagraph", json!({"after": "p0005", "text": "Provide corner bead."})).unwrap();
+        let o = outline::origins(&mut a);
+        assert_eq!(o["counts"], json!({"added": 1, "master": 5, "modified": 1}));
+        let layout = a.session.layout();
+        let marks = marks::marked(&mut a, &layout);
+        use wordcraft_engine::cmd::spec::edits::Origin;
+        assert_eq!(marks.iter().find(|m| m.id == "p0005").unwrap().origin, Origin::Modified);
+        assert_eq!(marks.iter().find(|m| m.id == "u0001").unwrap().origin, Origin::Added);
+        // The outline draws filtered to changes, with the caret's details.
+        a.speccraft.filter = outline::Filter::Changed;
+        a.run("ui.spec.outlinePane", json!({"value": true, "view": "outline"})).unwrap();
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            egui::Panel::right("edits_test").default_size(320.0).show(ui, |ui| outline::pane(&mut a, ui));
+        });
+        out.drop_without_applying_deltas();
+        // Restore through the command the panel's button runs.
+        a.run("spec.restore", json!({"id": "p0005"})).unwrap();
+        assert_eq!(outline::origins(&mut a)["counts"], json!({"added": 1, "master": 6}));
     }
 
     #[test]

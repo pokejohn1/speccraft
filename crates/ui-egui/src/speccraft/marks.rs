@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use egui::{Color32, Painter, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use serde_json::json;
+use wordcraft_engine::cmd::spec::edits::{self, Origin};
 use wordcraft_engine::cmd::spec::fields::{self, FieldState};
 use wordcraft_engine::cmd::spec::sections::{self, State};
 use wordcraft_layout::DocLayout;
@@ -21,6 +22,8 @@ use crate::theme::Tokens;
 pub(crate) struct Marked {
     pub id: String,
     pub state: State,
+    /// Reworded (`modified`) or written (`added`) in this project.
+    pub origin: Origin,
     pub level: u8,
     pub pieces: Vec<(usize, wordcraft_geom::Rect)>,
 }
@@ -52,11 +55,14 @@ pub(crate) fn marked(app: &mut WordApp, layout: &Arc<DocLayout>) -> Arc<Vec<Mark
     }
     let doc = &app.session.doc;
     let hint = app.session.page_hint;
+    let (origins, _) = edits::origins(doc);
+    let origin_of: std::collections::HashMap<String, Origin> = origins.into_iter().map(|(e, o)| (e.id, o)).collect();
     let items: Vec<Marked> = sections::states(doc)
         .into_iter()
         .map(|(e, state)| {
             let pieces = layout.selection_rects(doc, &e.range.start, &e.range.end, hint);
-            Marked { id: e.id, state, level: e.level.unwrap_or(1), pieces }
+            let origin = origin_of.get(&e.id).copied().unwrap_or(Origin::Master);
+            Marked { id: e.id, state, origin, level: e.level.unwrap_or(1), pieces }
         })
         .collect();
     let marked_fields: Vec<MarkedField> = fields::fields(doc)
@@ -179,6 +185,16 @@ pub(crate) fn paint(app: &mut WordApp, ui: &mut Ui, painter: &Painter, rects: &[
             }
             if m.state == State::Refused {
                 painter.circle_filled(mark.center(), size * 0.22, t.blue);
+            }
+            // Origin, beside the mark: * reworded, + written in this project.
+            let tag = match m.origin {
+                Origin::Modified => Some(("*", t.orange)),
+                Origin::Added => Some(("+", t.accent)),
+                Origin::Master => None,
+            };
+            if let Some((tag, color)) = tag {
+                let font = egui::FontId::proportional((size * 1.1).max(9.0));
+                painter.text(pos2(mark.max.x + 2.0, mark.min.y - 1.0), egui::Align2::LEFT_TOP, tag, font, color);
             }
             let resp = ui.interact(mark.expand(2.0), ui.scope_id().with(("spec_mark", &m.id)), Sense::click());
             let resp = resp.on_hover_text(tl!(describe(m.state)));

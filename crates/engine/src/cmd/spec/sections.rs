@@ -526,6 +526,8 @@ fn import(s: &mut Session, _v: &Value) -> CmdResult {
     let mut on: Vec<bool> = entries.iter().map(|e| e.on || (fresh.contains(e.id.as_str()) && matches!(e.kind, Kind::Title | Kind::End))).collect();
     settle(&entries, &mut on);
     write_state(&mut s.doc, &entries, &on);
+    // The master's wording, recorded once at the first import (M8: origin and restore).
+    super::edits::record_originals(&mut s.doc);
 
     let kinds: serde_json::Map<String, Value> =
         Kind::ALL.iter().map(|k| (k.name().to_string(), json!(entries.iter().filter(|e| e.kind == *k).count()))).collect();
