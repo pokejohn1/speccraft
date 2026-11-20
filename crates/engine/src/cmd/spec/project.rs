@@ -54,7 +54,7 @@ pub fn specs() -> Vec<CommandSpec> {
             .pure(),
         CommandSpec::new("spec.project.info", "Project Information", LOC, info).params(r#"{"path": string (the project's .speccraft file)}"#).pure(),
         CommandSpec::new("spec.project.set", "Set Project Information", LOC, set)
-            .params(r#"{"path": string (the project's .speccraft file), "name"?: string, "number"?: string, "issue"?: string, "date"?: string, "values"?: {name: string or null (removes)}}"#)
+            .params(r#"{"path": string (the project's .speccraft file), "name"?: string, "number"?: string, "issue"?: string, "date"?: string, "values"?: {name: string or null (removes)}, "library"?: string or null (the master library folder)}"#)
             .pure(),
         CommandSpec::new("spec.project.addSection", "Add Section to Project", LOC, add_section)
             .params(r#"{"path": string (the project's .speccraft file), "master"?: string (a master .docx to copy into the project folder), "file"?: string (file name in the project folder: the copy's name, or an existing section file to add as it is)}"#)
@@ -99,6 +99,9 @@ pub struct ProjectFile {
     pub values: BTreeMap<String, String>,
     #[serde(default)]
     pub sections: Vec<SectionRef>,
+    /// The master library folder this project draws from (M9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library: Option<String>,
     /// Rules between sections (M6), checked by `spec.project.validate`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<ProjectRule>,
@@ -340,7 +343,7 @@ fn furniture_text(doc: &Document) -> Vec<String> {
 
 /// A master's version stamp: the first header or footer piece mentioning "master", "version" or
 /// "rev" (the University of Houston sample has "UH Master: 12.2021").
-fn version_stamp(doc: &Document) -> String {
+pub fn version_stamp(doc: &Document) -> String {
     for line in furniture_text(doc) {
         for piece in line.split('\t') {
             let low = piece.to_lowercase();
@@ -542,6 +545,7 @@ fn summary(path: &Path, f: &ProjectFile) -> Value {
         "values": f.values,
         "sections": sections,
         "rules": f.rules,
+        "library": f.library,
     })
 }
 
@@ -563,6 +567,12 @@ fn set(_: &mut Session, v: &Value) -> CmdResult {
     }
     if f.project.name.is_empty() {
         return Err(CmdError::Params("the project `name` can't be empty".into()));
+    }
+    match v.get("library") {
+        None => {}
+        Some(Value::Null) => f.library = None,
+        Some(Value::String(l)) if l.chars().count() <= 1_000 => f.library = Some(l.trim().to_string()).filter(|l| !l.is_empty()),
+        Some(_) => return Err(CmdError::Params("`library` must be a folder path or null".into())),
     }
     match v.get("values") {
         None | Some(Value::Null) => {}
@@ -598,8 +608,17 @@ fn number_and_title(doc: &Document) -> (String, String) {
     entries.iter().find(|e| e.kind == Kind::Title).map(|e| split_title(&entry_text(doc, e))).unwrap_or_default()
 }
 
+/// Refuse a section number the project already has.
+fn duplicate_check(number: &str, taken: &[SectionRef]) -> Result<(), CmdError> {
+    let key = number_key(number);
+    match taken.iter().find(|s| !key.is_empty() && number_key(&s.number) == key) {
+        Some(other) => Err(CmdError::Failed(format!("the project already has Section {number} ({}); remove it first to add another", other.file))),
+        None => Ok(()),
+    }
+}
+
 /// Copy `master` into the project folder as `target`, import it, and record where it came from.
-fn copy_master(master: &Path, target: &Path) -> Result<(Document, MasterRef), CmdError> {
+fn copy_master(master: &Path, target: &Path, taken: &[SectionRef]) -> Result<(Document, MasterRef), CmdError> {
     let bytes = crate::io::read_document(master).map_err(CmdError::Failed)?;
     let doc = crate::io::open_bytes(&master.to_string_lossy(), &bytes).map_err(CmdError::Failed)?;
     if doc.custom_prop(ROLE_PROP) == Some("project") {
@@ -607,6 +626,8 @@ fn copy_master(master: &Path, target: &Path) -> Result<(Document, MasterRef), Cm
     }
     let mut s = Session::new(doc);
     s.run("spec.import", &json!({}))?;
+    // A section the project already has is refused before anything is written.
+    duplicate_check(&number_and_title(&s.doc).0, taken)?;
     // Choices, blanks and fill-ins become fields (M7); a section with none is fine.
     super::fields::detect(&mut s.doc)?;
     let baseline: Vec<String> =
@@ -641,7 +662,7 @@ fn add_section(_: &mut Session, v: &Value) -> CmdResult {
             if master.canonicalize().ok() == target.canonicalize().ok() && master.exists() {
                 return Err(CmdError::Failed("the copy can't replace its master".into()));
             }
-            let (doc, m) = copy_master(&master, &target)?;
+            let (doc, m) = copy_master(&master, &target, &f.sections)?;
             (file, doc, Some(m))
         }
         None => {
@@ -657,6 +678,7 @@ fn add_section(_: &mut Session, v: &Value) -> CmdResult {
         return Err(CmdError::Failed(format!("{file:?} is already in this project")));
     }
     let (number, title) = number_and_title(&doc);
+    duplicate_check(&number, &f.sections)?;
     f.sections.push(SectionRef { file: file.clone(), number, title, included: true, requires: Vec::new(), master: master_ref, extra: Map::new() });
     sort_by_number(&mut f.sections);
     store(&path, &f)?;
@@ -1150,6 +1172,16 @@ mod tests {
             fails("spec.project.addSection", json!({"path": path, "master": copy_path.to_string_lossy(), "file": "other.docx"}))
                 .contains("already a project copy")
         );
+        // A second copy of the same section, under another name, is refused and nothing is written.
+        assert!(
+            fails("spec.project.addSection", json!({"path": path, "master": m.to_string_lossy(), "file": "again.docx"}))
+                .contains("already has Section 09 2900")
+        );
+        assert!(!dir.join("project").join("again.docx").exists());
+        // The project remembers its library folder.
+        let lib = dir.join("masters").to_string_lossy().to_string();
+        assert_eq!(run("spec.project.set", json!({"path": path, "library": lib}))["library"], lib.as_str());
+        assert_eq!(run("spec.project.set", json!({"path": path, "library": null}))["library"], Value::Null);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -17,6 +17,7 @@ use crate::file_dialogs::{AfterPick, FileDialogRequest};
 use crate::theme::{Tokens, regular, semibold};
 use crate::widgets::{big, big_toggle, group};
 
+pub(crate) mod library;
 pub(crate) mod marks;
 pub(crate) mod outline;
 pub(crate) mod rules_view;
@@ -58,6 +59,8 @@ pub struct SpecUi {
     pub(crate) printed: Option<outline::Printed>,
     /// The project information being edited in the Sections pane.
     info_form: Option<InfoForm>,
+    /// The Master Library pane (M9).
+    pub library: library::LibraryUi,
 }
 
 /// Project information as typed in the Sections pane, before it is saved.
@@ -85,6 +88,9 @@ enum Pick {
 /// The `ui.spec.*` commands (see [`crate::app`]'s `ui_command`).
 pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, String> {
     let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
+    if id.starts_with("ui.spec.library") {
+        return library::command(app, id, p);
+    }
     match id {
         "ui.spec.sectionsPane" => {
             app.speccraft.pane_open = p.get("value").and_then(Value::as_bool).unwrap_or(!app.speccraft.pane_open);
@@ -216,6 +222,7 @@ fn open_project(app: &mut WordApp, path: PathBuf) -> Result<Value, String> {
     app.speccraft.info = Some(info.clone());
     app.speccraft.findings = None;
     app.speccraft.pane_open = true;
+    library::from_project(app, &info);
     Ok(info)
 }
 
@@ -294,12 +301,15 @@ fn moved(info: Option<&Value>, file: &str, by: i64) -> Option<Vec<String>> {
 /// The Specs ribbon tab.
 pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
     poll(app);
+    library::poll(app);
     let has_project = app.speccraft.project.is_some();
     group(ui, "Project", None, app, |ui, app| {
         big(ui, app, "open", "Open\nProject…", "ui.spec.openProject", json!({}), false);
         big(ui, app, "plus", "New\nProject…", "ui.spec.newProject", json!({}), false);
         let open = app.speccraft.pane_open;
         big_toggle(ui, app, "navPane", "Sections\nPane", "ui.spec.sectionsPane", open);
+        let lib = app.speccraft.library.open;
+        big_toggle(ui, app, "search", "Master\nLibrary", "ui.spec.library", lib);
         ui.add_enabled_ui(has_project, |ui| {
             big(ui, app, "file", "Add\nSection…", "ui.spec.addSection", json!({}), false);
             big(ui, app, "checkErrors", "Check\nProject", "ui.spec.check", json!({}), false);

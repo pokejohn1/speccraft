@@ -66,6 +66,8 @@ pub enum Pane {
     Sections,
     /// Speccraft fork: the section's paragraphs and how they print.
     SpecOutline,
+    /// Speccraft fork: the master library.
+    SpecLibrary,
 }
 
 impl Pane {
@@ -84,6 +86,7 @@ impl Pane {
             Self::Comments => "Comments",
             Self::Sections => "Sections",
             Self::SpecOutline => "Spec Outline",
+            Self::SpecLibrary => "Master Library",
         }
     }
 
@@ -102,6 +105,7 @@ impl Pane {
             Self::Comments => (Edge::End, 290.0),
             Self::Sections => (Edge::Start, 280.0),
             Self::SpecOutline => (Edge::End, 320.0),
+            Self::SpecLibrary => (Edge::Start, 330.0),
         };
         PaneState::docked(edge, width)
     }
@@ -122,10 +126,11 @@ impl Pane {
             Self::Comments => "comments",
             Self::Sections => "sections",
             Self::SpecOutline => "specOutline",
+            Self::SpecLibrary => "specLibrary",
         }
     }
 
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::SmartArtText,
         Self::Navigation,
         Self::Clipboard,
@@ -139,6 +144,7 @@ impl Pane {
         Self::Comments,
         Self::Sections,
         Self::SpecOutline,
+        Self::SpecLibrary,
     ];
 
     fn from_key(key: &str) -> Option<Self> {
@@ -157,7 +163,7 @@ impl Pane {
             Self::AltText => Some("view.altTextPane"),
             Self::FormatShape => Some("view.formatShapePane"),
             Self::Comments => Some("view.commentsPane"),
-            Self::RestrictEditing | Self::Proofing | Self::Sections | Self::SpecOutline => None,
+            Self::RestrictEditing | Self::Proofing | Self::Sections | Self::SpecOutline | Self::SpecLibrary => None,
         }
     }
 }
@@ -185,6 +191,7 @@ impl PaneContent<Pane> for Content<'_> {
             Pane::Comments => comments(app, ui),
             Pane::Sections => crate::speccraft::pane(app, ui),
             Pane::SpecOutline => crate::speccraft::outline::pane(app, ui),
+            Pane::SpecLibrary => crate::speccraft::library::pane(app, ui),
         })
     }
 

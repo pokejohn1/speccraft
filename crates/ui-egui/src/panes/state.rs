@@ -52,6 +52,7 @@ pub fn open(app: &WordApp) -> Vec<Pane> {
         (Pane::Comments, v.comments_pane),
         (Pane::Sections, app.speccraft.pane_open),
         (Pane::SpecOutline, app.speccraft.outline_open),
+        (Pane::SpecLibrary, app.speccraft.library.open),
     ]
     .into_iter()
     .filter_map(|(pane, shown)| shown.then_some(pane))
