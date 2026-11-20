@@ -15,6 +15,7 @@ use super::{controls, pos_json};
 use crate::{CmdError, CmdResult, CommandSpec, Selection, Session, p};
 
 mod output;
+pub mod project;
 mod sections;
 
 const LOC: &str = "Specs › Items";
@@ -37,6 +38,7 @@ pub fn specs() -> Vec<CommandSpec> {
     ];
     v.extend(sections::specs());
     v.extend(output::specs());
+    v.extend(project::specs());
     v
 }
 

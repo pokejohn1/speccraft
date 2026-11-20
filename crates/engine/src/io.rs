@@ -770,6 +770,19 @@ pub fn list_dir(path: &std::path::Path, max: usize) -> Result<(Vec<DirEntry>, bo
     Ok((out, false))
 }
 
+/// Create the folder at `path` and any missing parents, inside the automation write root.
+/// Added by the Speccraft fork (Specs › Project › Publish).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn create_dir_all(path: &std::path::Path) -> Result<(), String> {
+    crate::file_access::check_write(&path.to_string_lossy())?;
+    std::fs::create_dir_all(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn create_dir_all(path: &std::path::Path) -> Result<(), String> {
+    Err(format!("{}: folders are not created on the web", path.display()))
+}
+
 /// The title in the core properties of the Word package at `path` (a file of at most `max_file`
 /// bytes; at most `max_part` bytes of the part are read), inside the automation read root.
 #[cfg(not(target_arch = "wasm32"))]

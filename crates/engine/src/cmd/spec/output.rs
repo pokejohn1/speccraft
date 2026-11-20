@@ -20,7 +20,7 @@ const LOC: &str = "Specs › Print";
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("spec.exportPdf", "Export Printable PDF", LOC, export_pdf)
-            .params(r#"{"path"?: string (a .pdf file; default: the section file's own path with .pdf)}"#)
+            .params(r#"{"path"?: string (a .pdf file; default: the section file's own path with .pdf), "project"?: string (a .speccraft file whose values fill placeholders; default: the only one in the section's folder)}"#)
             .pure(),
     ]
 }
@@ -144,8 +144,23 @@ fn target(s: &Session, v: &Value) -> Result<PathBuf, CmdError> {
 /// Write a PDF of the paragraphs that print. Changes nothing in the document.
 fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
     let path = target(s, v)?;
-    let (copy, c) = printable_copy(&s.doc)?;
+    let (mut copy, c) = printable_copy(&s.doc)?;
     let mut warnings = Vec::new();
+    // Placeholders such as <Insert Project Name> take the project's values, in the copy only.
+    let mut filled = 0;
+    if let Some(project) = super::project::project_for(s.path.as_deref(), crate::p::str(v, "project"))? {
+        match super::project::load(&project) {
+            Ok(f) => {
+                let (n, missing) = super::project::fill_placeholders(&mut copy, &super::project::placeholder_values(&f));
+                filled = n;
+                if !missing.is_empty() {
+                    let names: Vec<String> = missing.iter().map(|m| format!("<Insert {m}>")).collect();
+                    warnings.push(format!("no project value for {}", names.join(", ")));
+                }
+            }
+            Err(e) => warnings.push(format!("project values not used: {e}")),
+        }
+    }
     if c.printed == 0 {
         warnings.push("nothing is switched on: the PDF is a blank page".to_string());
     }
@@ -172,6 +187,7 @@ fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
         "notes": c.notes,
         "unmanaged": c.unmanaged,
         "sectionBreaksMoved": c.breaks_moved,
+        "placeholdersFilled": filled,
         "warnings": warnings,
     }))
 }
