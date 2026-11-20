@@ -420,7 +420,7 @@ pub fn restore_placeholder(s: &mut Session) -> Result<(), CmdError> {
 // ---------------------------------------------------------------------------------------------
 // Insert
 
-fn insert(s: &mut Session, v: &Value, kind: ControlKind) -> CmdResult {
+pub(crate) fn insert(s: &mut Session, v: &Value, kind: ControlKind) -> CmdResult {
     let mut ctl = ContentControl::new(kind);
     ctl.id = Some(new_id(s));
     if let Some(t) = short(v, "title") {
