@@ -20,11 +20,20 @@ Keep it current: whenever an original file is edited, add a row in the same chan
 
 | File | Change | Why |
 |---|---|---|
-| `crates/engine/src/cmd/mod.rs` | Added `pub mod spec;` and `v.extend(spec::specs());` (2 lines) | Registers the spec commands |
+| `crates/engine/src/cmd.rs` (was `cmd/mod.rs` before WordCraft 0.18) | Added `pub mod spec;` and `v.extend(spec::specs());` (2 lines) | Registers the spec commands |
 | `crates/engine/src/cmd/controls.rs` | `fn insert` became `pub(crate) fn insert` (1 word) | Lets the spec commands reuse the content control insert code |
 | `.gitignore` | Added a block at the end ignoring `*.docx`, `*.docm`, `*.dotx`, `*.dotm`, `*.doc`, `*.pdf`, `*.rtf`, `*.odt` | The repo is public: author masters, project sections and exported PDFs must never be committed. Upstream tracks no files of these types. To add a test file of one of these types on purpose, use `git add -f` |
 
+## Merge history
+
+| Date | WordCraft version | Result |
+|---|---|---|
+| 2026-10-21 | 0.9.0 (`e05b7fe`) | Forked |
+| 2026-11-19 | v0.18.1 | Merged with no conflicts (git followed `cmd/mod.rs` → `cmd.rs`). All 22 spec tests pass; engine tests 1379 of 1380 pass, the one failure is upstream's (below) |
+
 ## Merging a newer WordCraft
+
+Merge a release tag (for example `v0.19.0`), not `main`.
 
 1. Fetch the new version and merge it.
 2. If git reports a conflict, it will be in one of the files above; keep both sides' changes.
@@ -47,7 +56,13 @@ steps. Run `cargo test --workspace --no-fail-fast` to see every failure, then `c
   hook in `crates/ui-egui/src/i18n/mod.rs` (log that edit in the table above) rather than editing
   the 22 `.tsv` files.
 
-### Upstream, not caused by Speccraft (font-dependent, fail on Windows)
+### Upstream, not caused by Speccraft
+
+- `swiss_german_and_portugal_portuguese_keep_their_languages_rules` (`crates/engine/src/cmd/packs.rs`):
+  fails on plain WordCraft v0.18.1 too ("German hyphenates Zusammenarbeit"), at least where no
+  German hyphenation data is installed. Seen on 2026-11-19.
+
+Font-dependent, fail on Windows:
 
 - `inline_box_that_resizes_to_fit_takes_its_texts_height` (`crates/layout/src/tests_textbox.rs`):
   it counts pages, and line heights depend on the installed fonts.
