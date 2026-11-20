@@ -14,6 +14,7 @@ Keep it current: whenever an original file is edited, add a row in the same chan
 | `crates/engine/src/cmd/spec.rs` | Spec commands `spec.tag`, `spec.list`, `spec.set`, and their tests (M1) |
 | `crates/engine/src/cmd/spec/sections.rs` | Section paragraphs (M2): `spec.import`, `spec.activate`, `spec.deactivate`, `spec.printable`, kinds and levels from styles, the on/off state (custom property `Speccraft.On`), the parent rule, and their tests. A child module of `spec.rs`, so it needs no registry line of its own |
 | `crates/engine/src/cmd/spec/output.rs` | PDF output (M3): `spec.exportPdf` writes a PDF of exactly the paragraphs that print, from a cleaned copy of the document through WordCraft's own PDF export and safe file write; and its tests. Also a child module of `spec.rs` |
+| `speccraft/tests/` | Test master sections (original wording), the M3 PDF regression check `check_pdfs.py` and its expected text, and a tool to rebuild a guide spec PDF as a .docx for local tests. Python; see its README |
 | `UPSTREAM-CHANGES.md` | This list |
 
 ## Original files edited
@@ -22,7 +23,7 @@ Keep it current: whenever an original file is edited, add a row in the same chan
 |---|---|---|
 | `crates/engine/src/cmd.rs` (was `cmd/mod.rs` before WordCraft 0.18) | Added `pub mod spec;` and `v.extend(spec::specs());` (2 lines) | Registers the spec commands |
 | `crates/engine/src/cmd/controls.rs` | `fn insert` became `pub(crate) fn insert` (1 word) | Lets the spec commands reuse the content control insert code |
-| `.gitignore` | Added a block at the end ignoring `*.docx`, `*.docm`, `*.dotx`, `*.dotm`, `*.doc`, `*.pdf`, `*.rtf`, `*.odt` | The repo is public: author masters, project sections and exported PDFs must never be committed. Upstream tracks no files of these types. To add a test file of one of these types on purpose, use `git add -f` |
+| `.gitignore` | Added a block at the end ignoring `*.docx`, `*.docm`, `*.dotx`, `*.dotm`, `*.doc`, `*.pdf`, `*.rtf`, `*.odt` | The repo is public: author masters, project sections and exported PDFs must never be committed. Upstream tracks no files of these types. To add a test file of one of these types on purpose, use `git add -f`. Also ignores Python caches under `speccraft/` |
 
 ## Merge history
 

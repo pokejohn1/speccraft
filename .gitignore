@@ -18,3 +18,4 @@ plan/
 *.pdf
 *.rtf
 *.odt
+speccraft/**/__pycache__/

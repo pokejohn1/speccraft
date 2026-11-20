@@ -44,9 +44,9 @@ pub struct Counts {
     pub breaks_kept: usize,
 }
 
-/// A copy of `doc` holding only what prints: spec items that [`sections::printable`] lists,
-/// tables as they are, and paragraphs outside any spec item when the nearest earlier spec item
-/// prints (never a note). Section breaks on paragraphs left out move to the nearest earlier
+/// A copy of `doc` holding only what prints: spec items that [`sections::printable`] lists, and
+/// tables and paragraphs outside any spec item when the nearest earlier spec item that is not a
+/// note prints (an unmanaged note never prints). Section breaks on paragraphs left out move to the nearest earlier
 /// paragraph kept, so page setup, headers and footers survive.
 pub fn printable_copy(doc: &Document) -> Result<(Document, Counts), CmdError> {
     let entries = sections::outline(doc);
@@ -61,19 +61,24 @@ pub fn printable_copy(doc: &Document) -> Result<(Document, Counts), CmdError> {
     c.omitted = managed.len().saturating_sub(c.printed);
 
     let mut kept: wordcraft_doc::Blocks = Vec::with_capacity(doc.body.len());
-    // Whether the nearest earlier spec item prints.
+    // Whether the nearest earlier spec item that is not a note prints.
     let mut follows = false;
+    let notes: HashSet<u32> = entries.iter().filter(|e| e.kind == Kind::Note).filter_map(top).collect();
     for (i, b) in doc.body.iter().enumerate() {
         let para = match b.as_ref() {
             Block::Table(_) => {
-                kept.push(b.clone());
+                if follows {
+                    kept.push(b.clone());
+                }
                 continue;
             }
             Block::Para(p) => p,
         };
         let keep = match u32::try_from(i).ok().and_then(|i| managed.get(&i)) {
             Some(p) => {
-                follows = *p;
+                if !notes.contains(&(i as u32)) {
+                    follows = *p;
+                }
                 *p
             }
             None => {
@@ -258,6 +263,25 @@ mod tests {
             ["SECTION 09 2900 - GYPSUM BOARD", "GENERAL", "SUMMARY", "[table]", "Section includes:", "Typed after import.", "END OF SECTION 09 2900"]
         );
         assert_eq!((c.unmanaged, c.unmanaged_printed), (3, 1));
+    }
+
+    #[test]
+    fn a_table_follows_the_paragraph_before_it_and_skips_notes() {
+        let mut s = imported();
+        // A table under "Interior gypsum board." (off) and one under "Section includes:" (on),
+        // with the article's note between the heading and its table.
+        s.doc.body.insert(6, Arc::new(Block::Table(Table::new(1, 1, 100.0))));
+        let (copy, _) = printable_copy(&s.doc).unwrap();
+        assert!(!texts(&copy).contains(&"[table]".to_string()), "{:?}", texts(&copy));
+
+        let mut s = imported();
+        s.doc.body.insert(4, Arc::new(Block::Table(Table::new(1, 1, 100.0))));
+        let (copy, _) = printable_copy(&s.doc).unwrap();
+        assert_eq!(texts(&copy)[..4], ["SECTION 09 2900 - GYPSUM BOARD", "GENERAL", "SUMMARY", "[table]"]);
+        // The same table once SUMMARY is off.
+        run(&mut s, "spec.deactivate", json!({"id": "p0003"}));
+        let (copy, _) = printable_copy(&s.doc).unwrap();
+        assert!(!texts(&copy).contains(&"[table]".to_string()), "{:?}", texts(&copy));
     }
 
     #[test]

@@ -70,7 +70,8 @@ impl Kind {
 }
 
 /// The kind and outline level of a paragraph, from its style id and its text. A paragraph with
-/// no recognised style is `Other` at level 1, so it can still be switched on and off.
+/// no recognised style is `Other` at level 1, so it can still be switched on and off; [`outline`]
+/// never makes it the parent of later paragraphs.
 pub fn classify(style: Option<&str>, text: &str) -> (Kind, Option<u8>) {
     if text.trim_start_matches(|c: char| c.is_whitespace() || c == OBJ).starts_with(NOTE_PREFIX) {
         return (Kind::Note, None);
@@ -132,6 +133,10 @@ pub fn outline(doc: &Document) -> Vec<Entry> {
         let Some(para) = section_para(doc, &range) else { continue };
         let (kind, level) = classify(para.props.style.as_deref(), &para.text);
         let parent = level.and_then(|l| {
+            if kind == Kind::Other {
+                // Looks its parent up without closing anything: it is a leaf (see below).
+                return open.iter().rev().find(|(pl, _)| *pl < l).map(|(_, i)| *i);
+            }
             while open.last().is_some_and(|(pl, _)| *pl >= l) {
                 open.pop();
             }
@@ -139,7 +144,9 @@ pub fn outline(doc: &Document) -> Vec<Entry> {
         });
         let parent_prints = parent.is_none_or(|p| out.get(p).is_some_and(|e| e.on));
         let on = prints(kind, stored.contains(id.as_str()), parent_prints);
-        if let Some(l) = level {
+        // A paragraph with no spec style is a leaf: if it became a parent, switching off one stray
+        // paragraph would take every later Article of its Part with it.
+        if let Some(l) = level.filter(|_| kind != Kind::Other) {
             open.push((l, out.len()));
         }
         out.push(Entry { id, kind, level, parent, on, range });
@@ -363,7 +370,7 @@ fn import(s: &mut Session, _v: &Value) -> CmdResult {
         .filter(|e| e.kind == Kind::Other)
         .map(|e| {
             let text: String = s.doc.control_text(&e.range).chars().take(WARN_CHARS).collect();
-            json!({"id": e.id, "text": text, "message": "no recognised spec style: treated as level 1"})
+            json!({"id": e.id, "text": text, "message": "no recognised spec style: switched on and off on its own, under the section title"})
         })
         .collect();
     Ok(json!({
@@ -566,6 +573,25 @@ mod tests {
         assert_eq!(printable(&mut s), ["p0001", "p0011", "p0012"]);
         run(&mut s, "spec.deactivate", json!({"id": "p0001"}));
         assert_eq!(printable(&mut s), Vec::<String>::new(), "the title takes everything under it along");
+    }
+
+    #[test]
+    fn an_unstyled_paragraph_is_never_a_parent() {
+        // A stray unstyled paragraph between two Articles of the same Part.
+        let mut s = Session::new(doc(&[
+            ("SCT", "SECTION 07 9200 - JOINT SEALANTS"),               // p0001
+            ("PRT", "EXECUTION"),                                      // p0002
+            ("ART", "PREPARATION"),                                    // p0003
+            ("", "Unstyled paragraph left in the master by mistake."), // p0004
+            ("ART", "INSTALLATION"),                                   // p0005
+            ("PR1", "Install sealants."),                              // p0006
+            ("EOS", "END OF SECTION 07 9200"),                         // p0007
+        ]));
+        run(&mut s, "spec.import", json!({}));
+        assert_eq!(row(&mut s, "p0005")["parent"], "p0002", "the Article stays under its Part");
+        run(&mut s, "spec.activate", json!({"ids": ["p0002", "p0003", "p0004", "p0005", "p0006"]}));
+        run(&mut s, "spec.deactivate", json!({"id": "p0004"}));
+        assert_eq!(printable(&mut s), ["p0001", "p0002", "p0003", "p0005", "p0006", "p0007"]);
     }
 
     #[test]
