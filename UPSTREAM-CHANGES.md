@@ -30,6 +30,7 @@ Keep it current: whenever an original file is edited, add a row in the same chan
 |---|---|---|
 | 2026-10-21 | 0.9.0 (`e05b7fe`) | Forked |
 | 2026-11-19 | v0.18.1 | Merged with no conflicts (git followed `cmd/mod.rs` → `cmd.rs`). All 22 spec tests pass; engine tests 1379 of 1380 pass, the one failure is upstream's (below) |
+| 2026-11-20 | v0.18.1 (checked again) | Full test run on Windows: 21 spec tests and `hostile_params_never_panic` pass; 5,754 tests pass, 12 fail, all upstream or environment (see Known issues). The gypsum board check gives the same results as before the upgrade (360 items, PDF unchanged by import, state survives save and reopen, `spec.exportPdf` gives a 1-page PDF) |
 
 ## Merging a newer WordCraft
 
@@ -44,30 +45,43 @@ Merge a release tag (for example `v0.19.0`), not `main`.
 `cargo xtask ci` stops at the first failing test, so on this machine it never reaches the later
 steps. Run `cargo test --workspace --no-fail-fast` to see every failure, then `cargo xtask assets`,
 `cargo xtask layers` and `cargo xtask wasm` separately. Only the failures below are expected.
+Checked on WordCraft v0.18.1, Windows, 2026-11-20.
 
-### Caused by Speccraft (left failing on purpose for now)
+### Caused by Speccraft
 
-- `every_tab_and_command_is_translated` (`crates/ui-egui/src/i18n/tests.rs`) fails: WordCraft
-  wants every command label and ribbon location translated into all 22 interface languages, and the
-  Speccraft labels are English only ("Specs", "Items", "Tag as Spec Item", "List Spec
-  Items", "Set Spec Item Text", "Import Section Paragraphs", "Switch Paragraph On", "Switch
-  Paragraph Off", "List Printable Paragraphs", "Export Printable PDF"). Effect: in a non-English interface these commands
-  show in English. To fix later: add translations, ideally in one new Speccraft file with a small
-  hook in `crates/ui-egui/src/i18n/mod.rs` (log that edit in the table above) rather than editing
-  the 22 `.tsv` files.
+- The Speccraft command labels and ribbon locations are English only ("Specs", "Items", "Tag as
+  Spec Item", "List Spec Items", "Set Spec Item Text", "Import Section Paragraphs", "Switch
+  Paragraph On", "Switch Paragraph Off", "List Printable Paragraphs", "Export Printable PDF"), so
+  in a non-English interface these commands show in English. No test flags this any more:
+  WordCraft 0.18 removed `every_tab_and_command_is_translated`. To fix later: add translations,
+  ideally in one new Speccraft file with a small hook in `crates/ui-egui/src/i18n/mod.rs` (log that
+  edit in the table above) rather than editing the 22 `.tsv` files.
 
 ### Upstream, not caused by Speccraft
 
-- `swiss_german_and_portugal_portuguese_keep_their_languages_rules` (`crates/engine/src/cmd/packs.rs`):
-  fails on plain WordCraft v0.18.1 too ("German hyphenates Zusammenarbeit"), at least where no
-  German hyphenation data is installed. Seen on 2026-11-19.
+These 11 also fail on plain WordCraft v0.18.1 (tag `v0.18.1`, no Speccraft code), so they come
+from WordCraft or from what this computer has installed.
 
-Font-dependent, fail on Windows:
+Language data not installed (hyphenation and spelling dictionaries):
 
-- `inline_box_that_resizes_to_fit_takes_its_texts_height` (`crates/layout/src/tests_textbox.rs`):
-  it counts pages, and line heights depend on the installed fonts.
-- `emoji_are_drawn_in_colour`, `emoji_keep_their_colours_on_a_dark_page` and
-  `emoji_with_text_effects_stay_drawn` (`crates/render/src/tests_color_glyphs.rs`): they expect a
-  particular colour emoji font.
+- `swiss_german_and_portugal_portuguese_keep_their_languages_rules` (`crates/engine/src/cmd/packs.rs`)
+- `review_language_validates_tags_and_marks_text_unchecked` (`crates/engine/src/tests.rs`)
+- `auto_hyphenation_breaks_long_words`, `fragmented_hidden_text_lays_out_like_the_visible_text`
+  and `hyphenation_and_proofing_follow_each_runs_language` (`crates/layout/src/tests.rs`)
 
-Neither the `layout` nor the `render` crate uses any Speccraft code.
+Fonts and symbols (user interface, `crates/ui-egui`):
+
+- `interface_symbols_have_glyphs` (`theme.rs`), `rtl_template_titles_are_right_aligned`
+  (`backstage`), and four tests that stop on a missing icon glyph (U+F03A):
+  `a_dialog_closing_into_the_browser_leaves_it_the_keyboard` (`file_browser`),
+  `the_title_bar_moves_the_window_in_every_modal_state` (`dialogs`),
+  `return_on_the_print_page_prints` (`tests`) and `the_player_and_the_file_browser_close_from_the_box`
+  (`window_close`)
+
+Timing, fails only when the whole suite runs at once:
+
+- `a_silent_connection_is_closed` (`apps/wordcraft/src/control_server.rs`): passes when run on its
+  own (`cargo test -p wordcraft --bin wordcraft a_silent_connection_is_closed`).
+
+No longer failing since v0.18.1: the layout test `inline_box_that_resizes_to_fit_takes_its_texts_height`
+and the three colour-emoji tests in `crates/render`.
