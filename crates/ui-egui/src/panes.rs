@@ -62,6 +62,8 @@ pub enum Pane {
     RestrictEditing,
     Proofing,
     Comments,
+    /// Speccraft fork: the open project's sections.
+    Sections,
 }
 
 impl Pane {
@@ -78,6 +80,7 @@ impl Pane {
             Self::RestrictEditing => "Restrict Editing",
             Self::Proofing => "Proofing",
             Self::Comments => "Comments",
+            Self::Sections => "Sections",
         }
     }
 
@@ -94,6 +97,7 @@ impl Pane {
             Self::RestrictEditing => (Edge::End, 270.0),
             Self::Proofing => (Edge::End, 400.0),
             Self::Comments => (Edge::End, 290.0),
+            Self::Sections => (Edge::Start, 280.0),
         };
         PaneState::docked(edge, width)
     }
@@ -112,10 +116,11 @@ impl Pane {
             Self::RestrictEditing => "restrictEditing",
             Self::Proofing => "proofing",
             Self::Comments => "comments",
+            Self::Sections => "sections",
         }
     }
 
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::SmartArtText,
         Self::Navigation,
         Self::Clipboard,
@@ -127,6 +132,7 @@ impl Pane {
         Self::RestrictEditing,
         Self::Proofing,
         Self::Comments,
+        Self::Sections,
     ];
 
     fn from_key(key: &str) -> Option<Self> {
@@ -145,7 +151,7 @@ impl Pane {
             Self::AltText => Some("view.altTextPane"),
             Self::FormatShape => Some("view.formatShapePane"),
             Self::Comments => Some("view.commentsPane"),
-            Self::RestrictEditing | Self::Proofing => None,
+            Self::RestrictEditing | Self::Proofing | Self::Sections => None,
         }
     }
 }
@@ -171,6 +177,7 @@ impl PaneContent<Pane> for Content<'_> {
             Pane::RestrictEditing => crate::dialogs_review::restrict_pane(app, ui),
             Pane::Proofing => crate::proofing_pane::show(app, ui),
             Pane::Comments => comments(app, ui),
+            Pane::Sections => crate::speccraft::pane(app, ui),
         })
     }
 

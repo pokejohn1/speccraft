@@ -15,6 +15,7 @@ Keep it current: whenever an original file is edited, add a row in the same chan
 | `crates/engine/src/cmd/spec/sections.rs` | Section paragraphs (M2): `spec.import`, `spec.activate`, `spec.deactivate`, `spec.printable`, kinds and levels from styles, the on/off state (custom property `Speccraft.On`), the parent rule, and their tests. A child module of `spec.rs`, so it needs no registry line of its own |
 | `crates/engine/src/cmd/spec/output.rs` | PDF output (M3): `spec.exportPdf` writes a PDF of exactly the paragraphs that print, from a cleaned copy of the document through WordCraft's own PDF export and safe file write; and its tests. Also a child module of `spec.rs` |
 | `crates/engine/src/cmd/spec/project.rs` | Project file (M4): `spec.project.new/info/set/addSection/removeSection/include/order/requires/validate/publish`; the `.speccraft` JSON format; copying a master into the project (records `Speccraft.Role`, `Speccraft.Master` and `Speccraft.Baseline` in the copy); placeholder filling used by `spec.exportPdf`; and its tests. A child module of `spec.rs` |
+| `crates/ui-egui/src/speccraft.rs` | The Specs ribbon tab and the Sections pane (M4): `ui.spec.*` commands (open/new/close project, add section from a master, open a section in the same window after saving the one on screen, include, move, remove, check, publish), and their tests |
 | `speccraft/tests/` | Test master sections (original wording), the M3 PDF regression check `check_pdfs.py` and its expected text, and a tool to rebuild a guide spec PDF as a .docx for local tests. Python; see its README |
 | `UPSTREAM-CHANGES.md` | This list |
 
@@ -23,6 +24,17 @@ Keep it current: whenever an original file is edited, add a row in the same chan
 | File | Change | Why |
 |---|---|---|
 | `crates/engine/src/cmd.rs` (was `cmd/mod.rs` before WordCraft 0.18) | Added `pub mod spec;` and `v.extend(spec::specs());` (2 lines) | Registers the spec commands |
+| `crates/engine/src/ribbon.rs` | `TABS` gained `"Specs"` after `"Review"` (13 → 14) | The Specs ribbon tab. After Review, not after Home, so upstream tests that expect Insert after Home keep passing |
+| `crates/ui-egui/src/ribbon/tabs.rs` | `TABS` length 13 → 14 | Follows the engine's list |
+| `crates/ui-egui/src/ribbon.rs` | One match arm: `"Specs" => crate::speccraft::ribbon(app, ui)` | Draws the Specs tab |
+| `crates/ui-egui/src/lib.rs` | `pub mod speccraft;` and the `WordApp` field `speccraft: speccraft::SpecUi` (4 lines) | State of the Specs tab and Sections pane |
+| `crates/ui-egui/src/app.rs` | `speccraft: Default::default(),` in `WordApp::new` | Initialises that field |
+| `crates/ui-egui/src/window_ui.rs` | `speccraft: _,` under "App-wide" in `swap_window` | WordCraft makes every `WordApp` field say whether it is app-wide or per window; the open project is app-wide |
+| `crates/ui-egui/src/app/commands.rs` | 4 lines at the top of `ui_command`: `ui.spec.*` goes to `crate::speccraft::command` | Registers the Specs UI commands |
+| `crates/ui-egui/src/panes.rs` | `Pane::Sections` and its arm in each match (title, default place: left, 280 pt; key `sections`; `ALL` 11 → 12; no close command; body) | The Sections pane |
+| `crates/ui-egui/src/panes/state.rs` | `(Pane::Sections, app.speccraft.pane_open)` in `open` | When the Sections pane shows |
+| `crates/ui-egui/src/panes/host.rs` | One arm in `close`: `Pane::Sections` sets `app.speccraft.pane_open = false` | Closing the pane from its title bar |
+| `crates/ui-egui/src/file_dialogs.rs` | One arm in `open_filters`: `"speccraft"` (Speccraft projects, All files) | Open Project's file filter |
 | `crates/engine/src/io.rs` | Added `create_dir_all` (checked against the automation write root, like `write_file`), with a web stub (13 lines, after `list_dir`) | `spec.project.publish` creates its Published folder; commands may only reach the disk through `io` (`file_access::tests::commands_do_not_touch_the_file_system_themselves`) |
 | `crates/engine/src/cmd/controls.rs` | `fn insert` became `pub(crate) fn insert` (1 word) | Lets the spec commands reuse the content control insert code |
 | `.gitignore` | Added a block at the end ignoring `*.docx`, `*.docm`, `*.dotx`, `*.dotm`, `*.doc`, `*.pdf`, `*.rtf`, `*.odt` | The repo is public: author masters, project sections and exported PDFs must never be committed. Upstream tracks no files of these types. To add a test file of one of these types on purpose, use `git add -f`. Also ignores Python caches under `speccraft/` |

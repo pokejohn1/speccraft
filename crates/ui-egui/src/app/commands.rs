@@ -509,6 +509,10 @@ impl WordApp {
 
     /// Commands that live in the UI layer.
     pub(crate) fn ui_command(&mut self, id: &str, p: &Value) -> Option<Result<Value, String>> {
+        // Speccraft fork: the Specs tab and Sections pane.
+        if id.starts_with("ui.spec.") {
+            return Some(crate::speccraft::command(self, id, p));
+        }
         let s = |k: &str| p.get(k).and_then(Value::as_str);
         Some(Ok(match id {
             "ui.checkForUpdates" | "help.checkForUpdates" => {

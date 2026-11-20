@@ -69,6 +69,8 @@ pub mod ribbon_fit;
 pub mod rtl;
 pub mod ruler_tabs;
 pub mod scroll;
+/// The Specs tab and Sections pane (Speccraft fork).
+pub mod speccraft;
 pub mod system_clipboard;
 pub mod table_mouse;
 pub mod table_pen;
@@ -634,6 +636,8 @@ pub struct WordApp {
     pub colors: Option<colors::ColorsDialog>,
     /// The Restrict Editing pane (#412).
     pub restrict: dialogs_review::RestrictPane,
+    /// The Specs tab and Sections pane (Speccraft fork).
+    pub speccraft: speccraft::SpecUi,
     /// The language-aware spelling and grammar task pane.
     pub spelling_review: Option<proofing_pane::SpellingForm>,
     pub status_msg: Option<(String, f64)>,

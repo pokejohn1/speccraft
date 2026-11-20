@@ -438,6 +438,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                     }
                     match app.ui.tab.as_str() {
                         "Home" => home(app, ui),
+                        "Specs" => crate::speccraft::ribbon(app, ui),
                         "Insert" => insert(app, ui),
                         "Draw" => draw(app, ui),
                         "Design" => design(app, ui),

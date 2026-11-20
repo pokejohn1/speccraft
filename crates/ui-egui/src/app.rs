@@ -84,6 +84,7 @@ impl WordApp {
             alt_modifier_seen,
         } = window_ui::WindowUi::new(session.document_id());
         WordApp {
+            speccraft: Default::default(),
             session,
             ui: UiState {
                 tab,

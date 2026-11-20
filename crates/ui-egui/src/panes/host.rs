@@ -155,6 +155,7 @@ fn close(app: &mut WordApp, pane: Pane) {
             let _ = app.run(id, json!({"value": false}));
         }
         None if pane == Pane::Proofing => app.spelling_review = None,
+        None if pane == Pane::Sections => app.speccraft.pane_open = false,
         None => app.restrict.open = false,
     }
 }
