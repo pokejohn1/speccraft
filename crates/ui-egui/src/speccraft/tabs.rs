@@ -44,6 +44,8 @@ pub(crate) fn switch(app: &mut WordApp, id: u64) -> Result<(), String> {
     }
     app.show_here(id);
     touch(app, id);
+    // As the project has things now (M20, M21).
+    super::project_settings::sync_open(app);
     Ok(())
 }
 

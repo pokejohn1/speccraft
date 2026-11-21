@@ -315,7 +315,8 @@ fn pieces(line: &str, number: &str, title: &str, values: &BTreeMap<String, Strin
 }
 
 /// One header or footer paragraph: `left`, a tab, `right` against the right margin.
-fn furniture_para(left: Vec<Piece>, right: Vec<Piece>, width: f32, style: Option<&str>) -> Paragraph {
+/// `inherited`: the style's tab stops, cleared so the right side goes to the margin.
+fn furniture_para(left: Vec<Piece>, right: Vec<Piece>, width: f32, style: Option<&str>, inherited: &[f32]) -> Paragraph {
     let mut text = String::new();
     let mut fields: Vec<(usize, &'static str)> = Vec::new();
     let mut add = |pieces: Vec<Piece>, text: &mut String| {
@@ -337,7 +338,13 @@ fn furniture_para(left: Vec<Piece>, right: Vec<Piece>, width: f32, style: Option
         let obj = InlineObject::Field { instr: instr.into(), result: "1".into(), locked: false, dirty: true, code: false, form: String::new() };
         let _ = para.insert_object(off, obj, &CharProps::default());
     }
-    para.props.tabs = Some(vec![TabStop { pos: width, align: TabAlign::Right, leader: TabLeader::None }]);
+    let mut tabs: Vec<TabStop> = inherited
+        .iter()
+        .filter(|p| (**p - width).abs() > 0.5)
+        .map(|p| TabStop { pos: *p, align: TabAlign::Clear, leader: TabLeader::None })
+        .collect();
+    tabs.push(TabStop { pos: width, align: TabAlign::Right, leader: TabLeader::None });
+    para.props.tabs = Some(tabs);
     para.touch();
     para
 }
@@ -349,12 +356,22 @@ pub fn put_furniture(doc: &mut Document, f: &ProjectFile, number: &str, title: &
     for (furn, kind, style) in [(&f.header, PartKind::Header, "Header"), (&f.footer, PartKind::Footer, "Footer")] {
         let Some(furn) = furn else { continue };
         let style = doc.styles.get(style).is_some().then_some(style);
+        let inherited: Vec<f32> = style
+            .map(|st| {
+                doc.styles
+                    .resolve_para(&wordcraft_doc::ParaProps { style: Some(st.to_string()), ..Default::default() })
+                    .tabs
+                    .iter()
+                    .map(|t| t.pos)
+                    .collect()
+            })
+            .unwrap_or_default();
         let lines = furn.left.len().max(furn.right.len()).max(1);
         let blocks: Vec<Arc<Block>> = (0..lines)
             .map(|i| {
                 let l = pieces(furn.left.get(i).map_or("", String::as_str), number, title, &values);
                 let r = pieces(furn.right.get(i).map_or("", String::as_str), number, title, &values);
-                Arc::new(Block::Para(furniture_para(l, r, width, style)))
+                Arc::new(Block::Para(furniture_para(l, r, width, style, &inherited)))
             })
             .collect();
         let id = doc.add_part(kind, blocks);

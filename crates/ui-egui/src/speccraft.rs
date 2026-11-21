@@ -24,6 +24,7 @@ pub(crate) mod marks;
 pub(crate) mod outline;
 pub(crate) mod overview;
 pub(crate) mod project_rules;
+pub(crate) mod project_settings;
 pub(crate) mod rules_view;
 pub(crate) mod tabs;
 pub(crate) mod updates;
@@ -77,6 +78,13 @@ pub struct SpecUi {
     pub(crate) choice_popup: Option<(String, egui::Pos2, u64)>,
     /// What is typed into a choice's blank on the page.
     pub(crate) choice_fill: String,
+    /// The header and footer being edited (M21), the standards report and its titles being
+    /// edited (M20).
+    pub(crate) furniture_form: Option<project_settings::FurnitureForm>,
+    pub(crate) standards: Option<Value>,
+    /// Print Options opens in the Sections pane next time it draws (Specs › Print Options).
+    pub(crate) show_print_options: bool,
+    pub(crate) standard_drafts: std::collections::HashMap<String, (String, String)>,
     pub(crate) print_form: wordcraft_engine::cmd::spec::forms::Form,
     pub(crate) publish_form: wordcraft_engine::cmd::spec::forms::Form,
     /// `spec.short.list`, per revision; the short wording being typed (M16).
@@ -159,6 +167,23 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
             let show = p.get("value").and_then(Value::as_bool).unwrap_or(app.speccraft.hide_marks);
             app.speccraft.hide_marks = !show;
             Ok(json!({"shown": show}))
+        }
+        "ui.spec.units" | "ui.spec.autoSelectNew" => {
+            // With a project open, a project setting every section takes (M20); else this section's.
+            let value = p.get("value").cloned().unwrap_or(Value::Null);
+            let in_project = app.speccraft.project.as_ref().is_some_and(|pr| app.session.path.as_deref().and_then(Path::parent) == pr.parent());
+            let (engine, key) = if id == "ui.spec.units" { ("spec.units", "units") } else { ("spec.autoSelectNew", "autoSelectNew") };
+            if in_project {
+                project_settings::change(app, json!({ key: value }))?;
+                Ok(json!({ key: value }))
+            } else {
+                app.run(engine, json!({"value": value}))
+            }
+        }
+        "ui.spec.printOptions" => {
+            app.speccraft.pane_open = true;
+            app.speccraft.show_print_options = true;
+            Ok(json!({"open": true}))
         }
         "ui.spec.why" => {
             let mut args = json!({});
@@ -465,6 +490,8 @@ fn open_section(app: &mut WordApp, file: &str) -> Result<Value, String> {
     }
     // In a tab of its own (M15): the section on screen keeps its changes in its tab.
     let was_open = tabs::open(app, &path)?;
+    // Terms, references, units and the header and footer as the project has them now (M20, M21).
+    project_settings::sync_open(app);
     if !was_open {
         app.status(crate::i18n::fmt(tl!("Opened {file}"), &[("file", file)]));
     }
@@ -503,6 +530,7 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
             big(ui, app, "checkErrors", "Check\nProject", "ui.spec.check", json!({}), false);
             big(ui, app, "export", "Publish\nProject", "ui.spec.publish", json!({}), false);
             big(ui, app, "coverPage", "Project\nManual", "ui.spec.manual", json!({}), false);
+            big(ui, app, "print", "Print\nOptions", "ui.spec.printOptions", json!({}), false);
             let shown = app.speccraft.overview.open;
             big(ui, app, "tableOfFigures", "Project\nOverview", "ui.spec.overview", json!({"value": !shown}), shown);
         });
@@ -539,9 +567,9 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
             wordcraft_engine::cmd::spec::units::Units::Us => ("Units:\nUS", "metric"),
             wordcraft_engine::cmd::spec::units::Units::Metric => ("Units:\nMetric", "both"),
         };
-        big(ui, app, "ruler", label, "spec.units", json!({"value": next}), false);
+        big(ui, app, "ruler", label, "ui.spec.units", json!({"value": next}), false);
         let auto = wordcraft_engine::cmd::spec::paragraphs::auto_select(&app.session.doc);
-        big(ui, app, "check", "Auto-Select\nNew", "spec.autoSelectNew", json!({"value": !auto}), auto);
+        big(ui, app, "check", "Auto-Select\nNew", "ui.spec.autoSelectNew", json!({"value": !auto}), auto);
     });
 }
 
@@ -617,6 +645,7 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
         ui.label(RichText::new(sub.join(" · ")).small().color(t.text_dim));
     }
     project_info(app, ui, &info);
+    project_settings::show(app, ui, &info);
     project_rules::show(app, ui, &info);
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
@@ -736,7 +765,11 @@ fn project_info(app: &mut WordApp, ui: &mut Ui, info: &Value) {
             }
         });
         ui.add_space(4.0);
-        ui.label(RichText::new(tl!("Values for placeholders such as <Insert Architect Name>")).small().color(t.text_dim));
+        ui.label(
+            RichText::new(tl!("Global terms: values for placeholders such as <Insert Project ID>. Sections show them in purple and print them."))
+                .small()
+                .color(t.text_dim),
+        );
         let mut remove = None;
         for (i, (k, v)) in form.values.iter_mut().enumerate() {
             ui.horizontal(|ui| {
@@ -790,6 +823,8 @@ fn save_info(app: &mut WordApp, info: &Value, form: &InfoForm) -> Result<Value, 
     )?;
     app.speccraft.info = Some(r.clone());
     app.speccraft.info_form = None;
+    // The section on screen shows the new values (M20).
+    project_settings::sync_open(app);
     app.status(tl!("Project information saved"));
     Ok(r)
 }

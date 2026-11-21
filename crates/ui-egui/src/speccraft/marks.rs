@@ -13,6 +13,7 @@ use wordcraft_engine::cmd::spec::edits::{self, Origin};
 use wordcraft_engine::cmd::spec::fields::{self, Field, FieldKind, FieldState};
 use wordcraft_engine::cmd::spec::rules::{self, Standing};
 use wordcraft_engine::cmd::spec::sections::{self, State};
+use wordcraft_engine::cmd::spec::terms;
 use wordcraft_layout::DocLayout;
 
 use crate::WordApp;
@@ -52,13 +53,33 @@ fn field_color(t: &Tokens, f: &Field) -> Color32 {
     }
 }
 
+/// A global term, section reference or reference standard on the page (M20).
+#[derive(Clone)]
+pub(crate) struct MarkedText {
+    pub kind: TextKind,
+    /// A reference's section number; a term's name; a standard's key.
+    pub name: String,
+    pub pieces: Vec<(usize, wordcraft_geom::Rect)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextKind {
+    Term,
+    Ref,
+    Standard,
+}
+
 /// The marks of a document revision laid out one way.
 pub(crate) struct MarksCache {
     rev: u64,
     layout: Arc<DocLayout>,
     pub items: Arc<Vec<Marked>>,
     pub fields: Arc<Vec<MarkedField>>,
+    pub texts: Arc<Vec<MarkedText>>,
 }
+
+/// Global terms' colour (M20): purple, readable on the page in both themes.
+const TERM: Color32 = Color32::from_rgb(132, 72, 178);
 
 /// The section paragraphs of the document on screen and where they are, cached per revision
 /// and layout.
@@ -100,8 +121,29 @@ pub(crate) fn marked(app: &mut WordApp, layout: &Arc<DocLayout>) -> Arc<Vec<Mark
             MarkedField { field: f, pieces }
         })
         .collect();
+    // Terms and references (inline controls), and standards found in the text (M20).
+    let mut texts: Vec<MarkedText> = terms::inline(doc)
+        .into_iter()
+        .map(|x| MarkedText {
+            kind: if x.kind == terms::InlineKind::Term { TextKind::Term } else { TextKind::Ref },
+            name: x.name.clone(),
+            pieces: layout.selection_rects(doc, &x.range.content_start(), &x.range.end, hint),
+        })
+        .collect();
+    for (b, block) in doc.body.iter().enumerate() {
+        let Some(p) = block.as_para() else { continue };
+        for st in terms::find_standards(&p.text) {
+            let at = |off: usize| wordcraft_doc::Pos::new(wordcraft_doc::StoryRef::Body, wordcraft_doc::Path::top(b), off);
+            texts.push(MarkedText {
+                kind: TextKind::Standard,
+                name: st.key(),
+                pieces: layout.selection_rects(doc, &at(st.range.start), &at(st.range.end), hint),
+            });
+        }
+    }
     let items = Arc::new(items);
-    app.speccraft.marks_cache = Some(MarksCache { rev, layout: layout.clone(), items: items.clone(), fields: Arc::new(marked_fields) });
+    app.speccraft.marks_cache =
+        Some(MarksCache { rev, layout: layout.clone(), items: items.clone(), fields: Arc::new(marked_fields), texts: Arc::new(texts) });
     items
 }
 
@@ -424,4 +466,82 @@ fn paint_fields(app: &mut WordApp, ui: &mut Ui, painter: &Painter, rects: &[Rect
         }
     }
     choice_popup(app, ui, &t, frame);
+    paint_texts(app, ui, painter, rects, layout, fallback_scale);
+}
+
+/// Paint global terms (purple), section references (green; Ctrl+click opens the section) and
+/// reference standards (a dotted green line) (M20).
+fn paint_texts(app: &mut WordApp, ui: &mut Ui, painter: &Painter, rects: &[Rect], layout: &Arc<DocLayout>, fallback_scale: f32) {
+    let Some(texts) = app.speccraft.marks_cache.as_ref().map(|c| c.texts.clone()) else { return };
+    let t = Tokens::get(ui.ctx());
+    let clip = ui.clip_rect();
+    let ctrl = ui.input(|i| i.modifiers.command);
+    let mut open: Option<String> = None;
+    for x in texts.iter() {
+        let mut first: Option<Rect> = None;
+        for (pi, r) in &x.pieces {
+            let Some(pr) = rects.get(*pi) else { continue };
+            let scale = layout.pages.get(*pi).map_or(fallback_scale, |page| crate::canvas::page_screen_scale(*pr, page, fallback_scale));
+            let sr = Rect::from_min_size(pos2(pr.min.x + r.x * scale, pr.min.y + r.y * scale), vec2(r.w * scale, r.h * scale));
+            if !sr.intersects(clip) {
+                continue;
+            }
+            first.get_or_insert(sr);
+            match x.kind {
+                TextKind::Term => {
+                    painter.rect_filled(sr, 2.0, TERM.gamma_multiply(0.14));
+                    painter.line_segment([sr.left_bottom(), sr.right_bottom()], Stroke::new(1.0, TERM.gamma_multiply(0.8)));
+                }
+                TextKind::Ref => {
+                    painter.line_segment([sr.left_bottom(), sr.right_bottom()], Stroke::new(1.0, t.green));
+                }
+                TextKind::Standard => {
+                    let mut px = sr.min.x;
+                    while px < sr.max.x {
+                        painter.line_segment([pos2(px, sr.max.y), pos2((px + 1.5).min(sr.max.x), sr.max.y)], Stroke::new(1.0, t.green));
+                        px += 3.0;
+                    }
+                }
+            }
+        }
+        let Some(area) = first else { continue };
+        let hint = match x.kind {
+            TextKind::Term => crate::i18n::fmt(tl!("Global term: {name}. Change it in Project Information."), &[("name", &x.name)]),
+            TextKind::Ref => tl!("Section reference: Ctrl+click to open the section").to_string(),
+            TextKind::Standard => crate::i18n::fmt(tl!("Reference standard {name}"), &[("name", &x.name)]),
+        };
+        // Only a held Ctrl makes a reference clickable, so a plain click still places the caret.
+        if x.kind == TextKind::Ref && ctrl {
+            let resp = ui.interact(area, ui.scope_id().with(("spec_ref", &x.name, area.min.x as i32, area.min.y as i32)), Sense::click());
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if resp.clicked() {
+                open = Some(x.name.clone());
+            }
+        } else {
+            // Hover only: a click still goes to the page.
+            let _ = ui
+                .interact(area, ui.scope_id().with(("spec_text_tip", &x.name, area.min.x as i32, area.min.y as i32)), Sense::hover())
+                .on_hover_text(hint);
+        }
+    }
+    if let Some(number) = open {
+        let key = wordcraft_engine::cmd::spec::project::number_key(&number);
+        let file = app.speccraft.info.as_ref().and_then(|i| i.get("sections")).and_then(serde_json::Value::as_array).and_then(|s| {
+            s.iter()
+                .find(|x| {
+                    x.get("number").and_then(serde_json::Value::as_str).is_some_and(|n| wordcraft_engine::cmd::spec::project::number_key(n) == key)
+                })
+                .and_then(|x| x.get("file").and_then(serde_json::Value::as_str).map(str::to_string))
+        });
+        match file {
+            Some(f) => {
+                if let Err(e) = app.run("ui.spec.openSection", json!({"file": f})) {
+                    app.status(e);
+                }
+            }
+            None => app.status(crate::i18n::fmt(tl!("Section {n} is not in this project"), &[("n", &number)])),
+        }
+    }
 }

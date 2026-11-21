@@ -599,6 +599,7 @@ fn summary(path: &Path, f: &ProjectFile) -> Value {
                 "requires": s.requires,
                 "exists": dir.join(&s.file).is_file(),
                 "master": s.master.as_ref().map(|m| json!({"path": m.path, "version": m.version})),
+                "ownFurniture": s.extra.get("ownFurniture") == Some(&json!(true)),
             })
         })
         .collect();
@@ -613,6 +614,11 @@ fn summary(path: &Path, f: &ProjectFile) -> Value {
         "sections": sections,
         "rules": f.rules,
         "library": f.library,
+        "print": f.print,
+        "header": f.header,
+        "footer": f.footer,
+        "editing": f.editing,
+        "standards": f.standards,
     })
 }
 
