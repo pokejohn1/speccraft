@@ -79,7 +79,7 @@ pub fn specs() -> Vec<CommandSpec> {
             .pure(),
         CommandSpec::new("spec.project.validate", "Check Project", LOC, validate).params(r#"{"path": string (the project's .speccraft file)}"#).pure(),
         CommandSpec::new("spec.project.publish", "Publish Project Sections", LOC, publish)
-            .params(r#"{"path": string (the project's .speccraft file), "folder"?: string (default: Published beside the project file), "force"?: bool (publish even when Check Project finds errors), "format"?: "pdf" (default), "docx" or "both", "form"?: "full" (default), "short" or "outline", "depth"?: n}"#)
+            .params(r#"{"path": string (the project's .speccraft file), "folder"?: string (default: Published beside the project file), "force"?: bool (publish even when Check Project finds errors), "format"?: "pdf" (default), "docx" or "both", "form"?: "full" (default), "short" or "outline", "depth"?: n, "division"?: "08" (only that division's sections), "print"?: {option: value} (print options over the project's, M22)}"#)
             .pure(),
         CommandSpec::new("spec.project.acknowledge", "Acknowledge Finding", LOC, acknowledge)
             .params(r#"{"path": string (the project's .speccraft file), "key": string (a warning or notice's key from spec.project.validate), "note"?: string, "undo"?: bool}"#)
@@ -111,8 +111,49 @@ pub struct ProjectFile {
     /// Warnings and notices the author has looked at and accepted (M10), by finding key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub acknowledged: Vec<Acknowledged>,
+    /// Reference standards' titles and editions (M20), by key ("ASTM C1396/C1396M").
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub standards: BTreeMap<String, StandardInfo>,
+    /// Editing settings every section takes (M20).
+    #[serde(default, skip_serializing_if = "Editing::is_default")]
+    pub editing: Editing,
+    /// The project's default header and footer (M21); `None` leaves each section's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<super::print::Furniture>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footer: Option<super::print::Furniture>,
+    /// Print and export options (M22).
+    #[serde(default)]
+    pub print: super::print::PrintOptions,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// A reference standard as the project lists it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandardInfo {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub edition: String,
+}
+
+/// Editing settings for every section of the project (M20).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Editing {
+    /// New paragraphs come switched on (M18); `None` leaves each section's own setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_select_new: Option<bool>,
+    /// "both", "us" or "metric" (M19).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units: Option<String>,
+}
+
+impl Editing {
+    fn is_default(&self) -> bool {
+        *self == Editing::default()
+    }
 }
 
 /// A finding the author accepted, with why.
@@ -249,6 +290,11 @@ pub fn load(path: &Path) -> Result<ProjectFile, CmdError> {
 }
 
 /// Write a project file (pretty JSON, so it reads well and diffs well).
+/// Write the project file (for the other Speccraft modules).
+pub(crate) fn store_file(path: &Path, f: &ProjectFile) -> Result<(), CmdError> {
+    store(path, f)
+}
+
 fn store(path: &Path, f: &ProjectFile) -> Result<(), CmdError> {
     let text = serde_json::to_string_pretty(f).map_err(|e| CmdError::Failed(e.to_string()))?;
     crate::io::write_file(&path.to_string_lossy(), format!("{text}\n").as_bytes()).map_err(CmdError::Failed)
@@ -292,6 +338,11 @@ fn entry<'a>(f: &'a mut ProjectFile, file: &str) -> Result<&'a mut SectionRef, C
 pub fn number_key(s: &str) -> String {
     let d: String = s.chars().filter(char::is_ascii_digit).take(8).collect();
     if d.len() >= 5 { d } else { String::new() }
+}
+
+/// A division's two digits from "08", "Division 08" or "08 1113".
+pub fn number_key_prefix(s: &str) -> String {
+    s.chars().filter(char::is_ascii_digit).take(2).collect()
 }
 
 /// The number and title of a section title such as "SECTION 09 2900 - GYPSUM BOARD".
@@ -619,7 +670,7 @@ fn set(_: &mut Session, v: &Value) -> CmdResult {
 }
 
 /// The number and title of an imported section, from its title paragraph.
-fn number_and_title(doc: &Document) -> (String, String) {
+pub(crate) fn number_and_title(doc: &Document) -> (String, String) {
     let entries = sections::outline(doc);
     entries.iter().find(|e| e.kind == Kind::Title).map(|e| split_title(&entry_text(doc, e))).unwrap_or_default()
 }
@@ -1090,6 +1141,10 @@ fn publish(s: &mut Session, v: &Value) -> CmdResult {
     };
     let form = super::forms::Form::from_params(v)?;
     let f = load(&path)?;
+    let opts = match v.get("print") {
+        Some(c) if !c.is_null() => f.print.merged(c)?,
+        _ => f.print.clone(),
+    };
     let dir = folder(&path);
     let out_dir = match p::str(v, "folder") {
         Some(d) => PathBuf::from(d),
@@ -1100,7 +1155,8 @@ fn publish(s: &mut Session, v: &Value) -> CmdResult {
     }
     crate::io::create_dir_all(&out_dir).map_err(CmdError::Failed)?;
     let mut done = Vec::new();
-    for s in f.sections.iter().filter(|s| s.included) {
+    let division = p::str(v, "division").map(number_key_prefix);
+    for s in f.sections.iter().filter(|s| s.included && division.as_ref().is_none_or(|d| number_key(&s.number).starts_with(d.as_str()))) {
         let full = dir.join(&s.file);
         let opened = crate::io::read_document(&full).and_then(|b| crate::io::open_bytes(&s.file, &b)).map_err(CmdError::Failed);
         let mut row = json!({"file": s.file});
@@ -1109,12 +1165,11 @@ fn publish(s: &mut Session, v: &Value) -> CmdResult {
                 let mut sess = Session::new(doc);
                 sess.path = Some(full.clone());
                 for ext in formats {
-                    // Word files go out under the section file's own name, in the Published folder.
-                    let stem = Path::new(&s.file).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    // Named as the print options say (M22), in the Published folder.
+                    let stem = super::print::file_stem(&opts, &s.file, &s.number, &s.title);
                     let out = out_dir.join(format!("{stem}{}.{ext}", form.suffix()));
                     let cmd = if *ext == "pdf" { "spec.exportPdf" } else { "spec.exportDocx" };
-                    let args =
-                        json!({"path": out.to_string_lossy(), "project": path.to_string_lossy(), "form": form.name(), "depth": v.get("depth")});
+                    let args = json!({"path": out.to_string_lossy(), "project": path.to_string_lossy(), "form": form.name(), "depth": v.get("depth"), "print": v.get("print")});
                     match sess.run(cmd, &args) {
                         Ok(x) => {
                             row[*ext] = json!(out.to_string_lossy());

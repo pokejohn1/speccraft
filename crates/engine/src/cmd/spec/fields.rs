@@ -389,7 +389,7 @@ fn control(f: &Found, original: &str, id: &str, control_id: i64) -> ContentContr
 }
 
 /// Ids of every content control, and the highest field number in use.
-fn used_ids(doc: &Document) -> (std::collections::BTreeSet<i64>, u32) {
+pub(crate) fn used_ids(doc: &Document) -> (std::collections::BTreeSet<i64>, u32) {
     let mut ids = std::collections::BTreeSet::new();
     let mut add = |bl: &wordcraft_doc::Blocks| {
         wordcraft_doc::control::walk_controls(bl, &mut |c| {
@@ -470,15 +470,20 @@ pub fn detect(doc: &mut Document) -> Result<BTreeMap<&'static str, usize>, CmdEr
 
 /// Replace a field's content with `text`, in the formatting of its first character.
 fn set_content(doc: &mut Document, f: &Field, text: &str) -> Result<(), CmdError> {
-    let a = f.range.content_start();
+    replace_content(doc, &f.range, text)
+}
+
+/// Replace an inline control's content with `text`, in the formatting of its first character.
+pub(crate) fn replace_content(doc: &mut Document, range: &ControlRange, text: &str) -> Result<(), CmdError> {
+    let a = range.content_start();
     let props = doc.para_at(&a).map(|p| p.props_of_char(a.off).clone()).unwrap_or_default();
-    if f.range.end.off > a.off {
-        doc.delete_range(&a, &f.range.end).map_err(|e| CmdError::Failed(e.to_string()))?;
+    if range.end.off > a.off {
+        doc.delete_range(&a, &range.end).map_err(|e| CmdError::Failed(e.to_string()))?;
     }
     if !text.is_empty() {
         doc.insert_text(&a, text, &props).map_err(|e| CmdError::Failed(e.to_string()))?;
     }
-    if let Some(c) = doc.control_mut(&f.range.start) {
+    if let Some(c) = doc.control_mut(&range.start) {
         c.showing_placeholder = false;
         if let ControlKind::ComboBox { last_value, .. } | ControlKind::DropDown { last_value, .. } = &mut c.kind {
             *last_value = String::new();

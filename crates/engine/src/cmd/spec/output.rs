@@ -25,10 +25,10 @@ const LOC: &str = "Specs › Print";
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("spec.exportPdf", "Export Printable PDF", LOC, export_pdf)
-            .params(r#"{"path"?: string (a .pdf file; default: the section file's own path with .pdf), "project"?: string (a .speccraft file whose values fill placeholders; default: the only one in the section's folder), "form"?: "full" (default), "short" or "outline", "depth"?: n (outline: paragraph levels below the Article, default 1)}"#)
+            .params(r#"{"path"?: string (a .pdf file; default: the section file's own path with .pdf), "project"?: string (a .speccraft file whose values fill placeholders; default: the only one in the section's folder), "form"?: "full" (default), "short" or "outline", "depth"?: n (outline: paragraph levels below the Article, default 1), "print"?: {option: value} (print options over the project's, M22)}"#)
             .pure(),
         CommandSpec::new("spec.exportDocx", "Export to Word", LOC, export_docx)
-            .params(r#"{"path"?: string (a .docx file; default: "<section> (issued).docx" beside the section file), "project"?: string, "form"?: string, "depth"?: n (as for spec.exportPdf)}"#)
+            .params(r#"{"path"?: string (a .docx file; default: "<section> (issued).docx" beside the section file), "project"?: string, "form"?: string, "depth"?: n, "print"?: {option: value} (as for spec.exportPdf)}"#)
             .pure(),
     ]
 }
@@ -65,6 +65,12 @@ pub fn printable_copy(doc: &Document) -> Result<(Document, Counts), CmdError> {
 /// [`printable_copy`] in a form (M16): the short form leaves out what the author marked and uses
 /// their short wording; the outline also stops at its depth.
 pub fn printable_copy_as(doc: &Document, form: super::forms::Form) -> Result<(Document, Counts), CmdError> {
+    printable_copy_with(doc, form, false)
+}
+
+/// [`printable_copy_as`]; with `notes` (a draft, M22) the author notes print too, where they
+/// sit among printing paragraphs.
+pub fn printable_copy_with(doc: &Document, form: super::forms::Form, notes_too: bool) -> Result<(Document, Counts), CmdError> {
     let entries = sections::outline(doc);
     if entries.is_empty() {
         return Err(CmdError::Failed("this document has no spec paragraphs yet: run spec.import first".into()));
@@ -93,10 +99,11 @@ pub fn printable_copy_as(doc: &Document, form: super::forms::Form) -> Result<(Do
         };
         let keep = match u32::try_from(i).ok().and_then(|i| managed.get(&i)) {
             Some(p) => {
-                if !notes.contains(&(i as u32)) {
+                let note = notes.contains(&(i as u32));
+                if !note {
                     follows = *p;
                 }
-                *p
+                *p || (notes_too && note && follows)
             }
             None => {
                 c.unmanaged += 1;
@@ -187,25 +194,50 @@ pub fn issued_copy(s: &Session, project: Option<&str>) -> Result<Issued, CmdErro
 
 /// [`issued_copy`] in a form (M16).
 pub fn issued_copy_as(s: &Session, project: Option<&str>, form: super::forms::Form) -> Result<Issued, CmdError> {
-    let (mut copy, mut c) = printable_copy_as(&s.doc, form)?;
+    issued_copy_with(s, project, form, None)
+}
+
+/// [`issued_copy_as`] with print options (M22): the project's, with `changes` (an object of
+/// options) laid over them.
+pub fn issued_copy_with(s: &Session, project: Option<&str>, form: super::forms::Form, changes: Option<&Value>) -> Result<Issued, CmdError> {
     let mut warnings = Vec::new();
+    let loaded = match super::project::project_for(s.path.as_deref(), project)? {
+        Some(path) => match super::project::load(&path) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                warnings.push(format!("project values not used: {e}"));
+                None
+            }
+        },
+        None => None,
+    };
+    let base = loaded.as_ref().map(|f| f.print.clone()).unwrap_or_default();
+    let opts = match changes {
+        Some(c) if !c.is_null() => base.merged(c)?,
+        _ => base,
+    };
+    // The section brought up to date with its project (M20, M21) — in the copy only.
+    let mut source = Session::new(s.doc.clone());
+    source.path = s.path.clone();
+    let file = s.path.as_deref().and_then(std::path::Path::file_name).map(|n| n.to_string_lossy().into_owned());
+    if let Some(f) = &loaded {
+        super::print::sync(&mut source, f, file.as_deref())?;
+    }
+    let (number, _) = super::project::number_and_title(&source.doc);
+    let (mut copy, mut c) = printable_copy_with(&source.doc, form, opts.draft)?;
     // Placeholders such as <Insert Project Name> take the project's values, in the copy only.
     let mut filled = 0;
-    if let Some(project) = super::project::project_for(s.path.as_deref(), project)? {
-        match super::project::load(&project) {
-            Ok(f) => {
-                let values = super::project::placeholder_values(&f);
-                c.fields_open.retain(|(_, original)| !super::project::filled_by_project(original, &values));
-                let (n, missing) = super::project::fill_placeholders(&mut copy, &values);
-                filled = n;
-                if !missing.is_empty() {
-                    let names: Vec<String> = missing.iter().map(|m| format!("<Insert {m}>")).collect();
-                    warnings.push(format!("no project value for {}", names.join(", ")));
-                }
-            }
-            Err(e) => warnings.push(format!("project values not used: {e}")),
+    if let Some(f) = &loaded {
+        let values = super::project::placeholder_values(f);
+        c.fields_open.retain(|(_, original)| !super::project::filled_by_project(original, &values));
+        let (n, missing) = super::project::fill_placeholders(&mut copy, &values);
+        filled = n;
+        if !missing.is_empty() {
+            let names: Vec<String> = missing.iter().map(|m| format!("<Insert {m}>")).collect();
+            warnings.push(format!("no project value for {}", names.join(", ")));
         }
     }
+    super::print::apply(&mut copy, &opts, &number);
     if c.printed == 0 {
         warnings.push("nothing is switched on: the copy is a blank page".to_string());
     }
@@ -230,7 +262,12 @@ pub fn issued_copy_as(s: &Session, project: Option<&str>, form: super::forms::Fo
 /// around spec paragraphs and fill-ins go (their text stays), and so do the `Speccraft.*`
 /// properties. Returns how many controls were taken off.
 pub fn strip_markings(doc: &mut Document) -> usize {
-    let ours = |tag: &str| tag.starts_with(super::TAG_PREFIX) || tag.starts_with(super::fields::FIELD_PREFIX);
+    let ours = |tag: &str| {
+        tag.starts_with(super::TAG_PREFIX)
+            || tag.starts_with(super::fields::FIELD_PREFIX)
+            || tag.starts_with(super::terms::TERM_PREFIX)
+            || tag.starts_with(super::terms::REF_PREFIX)
+    };
     let w = OBJ.len_utf8();
     let mut n = 0;
     // The last one first, so an inner fill-in goes before the paragraph around it; positions
@@ -279,7 +316,7 @@ fn report(path: &str, bytes: usize, pages: usize, i: &Issued) -> Value {
 /// Write a PDF of the paragraphs that print. Changes nothing in the document.
 fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
     let path = target(s, v, "pdf")?;
-    let issued = issued_copy_as(s, crate::p::str(v, "project"), super::forms::Form::from_params(v)?)?;
+    let issued = issued_copy_with(s, crate::p::str(v, "project"), super::forms::Form::from_params(v)?, v.get("print"))?;
     let pages = page_count(&issued.copy);
     let bytes = crate::io::save_bytes_opts("printable.pdf", &issued.copy, &crate::io::ExportOptions::default()).map_err(CmdError::Failed)?;
     let shown = path.to_string_lossy().to_string();
@@ -291,7 +328,7 @@ fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
 /// Changes nothing in the document.
 fn export_docx(s: &mut Session, v: &Value) -> CmdResult {
     let path = target(s, v, "docx")?;
-    let mut issued = issued_copy_as(s, crate::p::str(v, "project"), super::forms::Form::from_params(v)?)?;
+    let mut issued = issued_copy_with(s, crate::p::str(v, "project"), super::forms::Form::from_params(v)?, v.get("print"))?;
     let removed = strip_markings(&mut issued.copy);
     let pages = page_count(&issued.copy);
     let bytes = crate::io::save_bytes_opts("issued.docx", &issued.copy, &crate::io::ExportOptions::default()).map_err(CmdError::Failed)?;

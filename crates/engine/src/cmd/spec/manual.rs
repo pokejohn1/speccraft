@@ -16,7 +16,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use wordcraft_doc::props::{TabAlign, TabLeader, TabStop};
 use wordcraft_doc::section::{HeaderSet, SectionStart};
-use wordcraft_doc::{Align, Block, CharProps, Document, Paragraph, SectionProps};
+use wordcraft_doc::{Align, Block, CharProps, Document, Paragraph, PartKind, SectionProps};
 
 use super::library::division_name;
 use super::output;
@@ -29,7 +29,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("spec.project.manual", "Publish Project Manual", LOC, manual_cmd)
             .params(
-                r#"{"path": string (the project's .speccraft file), "format"?: "pdf" (default), "docx" or "both", "name"?: string (file name without extension; default "<project name> - Project Manual"), "folder"?: string (default: Published beside the project file), "contents"?: bool (table of contents first; default true), "pageNumbers"?: "restart" (default: each section from 1) or "continue", "force"?: bool (publish even when Check Project finds errors), "form"?: "full" (default), "short" or "outline", "depth"?: n}"#,
+                r#"{"path": string (the project's .speccraft file), "format"?: "pdf" (default), "docx" or "both", "name"?: string (file name without extension; default "<project name> - Project Manual"), "folder"?: string (default: Published beside the project file), "contents"?: bool (table of contents first; default true), "pageNumbers"?: "restart" (default: each section from 1) or "continue", "force"?: bool (publish even when Check Project finds errors), "form"?: "full" (default), "short" or "outline", "depth"?: n, "division"?: "08" (only that division), "contentsOnly"?: bool (only the table of contents), "print"?: {option: value} (print options over the project's: draft, oddPages, blankPageText, …; contents and pageNumbers default to them)}"#,
             )
             .pure(),
     ]
@@ -120,8 +120,44 @@ fn move_headers(out: &mut Document, src: &mut Document, perms: &mut u32) {
     });
 }
 
+/// How the manual lays sections out.
+#[derive(Clone, Debug, Default)]
+pub struct Layout {
+    pub contents: bool,
+    pub restart: bool,
+    /// Each section starts on an odd page: the blank page's text, and whether it has the header
+    /// and footer of the section before it (M22).
+    pub odd: Option<(String, bool)>,
+}
+
+/// A blank page after a section with an odd number of pages, so the next starts on an odd page.
+/// Returns whether it ended the section (no header and footer: a section of its own).
+fn blank_page(out: &mut Document, text: &str, furniture: bool) -> bool {
+    let mut p = Paragraph::with_text(text, CharProps { italic: Some(true), ..Default::default() });
+    p.props.page_break_before = Some(true);
+    p.props.align = Some(Align::Center);
+    p.props.space_before = Some(240.0);
+    if furniture {
+        out.body.push(Arc::new(Block::Para(p)));
+        return false;
+    }
+    close(out);
+    let empty = |out: &mut Document, kind| out.add_part(kind, vec![Arc::new(Block::Para(Paragraph::new()))]);
+    let (h, f) = (empty(out, PartKind::Header), empty(out, PartKind::Footer));
+    let mut sect = out.last_section.clone();
+    sect.headers = HeaderSet { default: Some(h), first: Some(h), even: Some(h) };
+    sect.footers = HeaderSet { default: Some(f), first: Some(f), even: Some(f) };
+    sect.start = SectionStart::NextPage;
+    sect.page_num_start = None;
+    p.props.page_break_before = None;
+    p.section = Some(Box::new(sect));
+    out.body.push(Arc::new(Block::Para(p)));
+    true
+}
+
 /// The manual: the table of contents (if any), then each part on its own pages.
-pub fn build(info: &project::Info, parts: Vec<Part>, contents: bool, restart: bool) -> Result<Document, CmdError> {
+pub fn build(info: &project::Info, parts: Vec<Part>, layout: &Layout) -> Result<Document, CmdError> {
+    let (contents, restart) = (layout.contents, layout.restart);
     let toc: Vec<(String, String, usize)> = parts.iter().map(|p| (p.number.clone(), p.title.clone(), p.pages)).collect();
     let mut docs = parts.into_iter().map(|p| p.doc);
     let Some(mut out) = docs.next() else { return Err(CmdError::Failed("no section to put in the manual".into())) };
@@ -129,8 +165,15 @@ pub fn build(info: &project::Info, parts: Vec<Part>, contents: bool, restart: bo
         first_section(&mut out).page_num_start = Some(1);
     }
     let mut perms = 0u32;
-    for mut d in docs {
-        close(&mut out);
+    for (k, mut d) in docs.enumerate() {
+        let before = toc.get(k).map_or(0, |t| t.2);
+        let ended = match &layout.odd {
+            Some((text, furniture)) if before % 2 == 1 => blank_page(&mut out, text, *furniture),
+            _ => false,
+        };
+        if !ended {
+            close(&mut out);
+        }
         move_headers(&mut out, &mut d, &mut perms);
         {
             let s = first_section(&mut d);
@@ -148,6 +191,10 @@ pub fn build(info: &project::Info, parts: Vec<Part>, contents: bool, restart: bo
     }
     if contents {
         put_contents(&mut out, info, &toc);
+        if layout.odd.is_some() {
+            // The first section after the contents starts on an odd page too.
+            first_section_after_contents(&mut out);
+        }
     }
     out.custom_props.retain(|p| !p.name.starts_with("Speccraft."));
     Ok(out)
@@ -204,6 +251,50 @@ fn put_contents(out: &mut Document, info: &project::Info, toc: &[(String, String
     out.body = front;
 }
 
+/// The section after the contents' own section starts on an odd page.
+fn first_section_after_contents(out: &mut Document) {
+    let mut seen = 0;
+    for b in out.body.iter_mut() {
+        if b.as_para().is_some_and(|p| p.section.is_some()) {
+            seen += 1;
+            if seen == 2
+                && let Block::Para(p) = Arc::make_mut(b)
+                && let Some(s) = p.section.as_deref_mut()
+            {
+                s.start = SectionStart::OddPage;
+                return;
+            }
+        }
+    }
+    if seen <= 1 {
+        out.last_section.start = SectionStart::OddPage;
+    }
+}
+
+/// Only the table of contents, on the first section's page.
+fn contents_only(info: &project::Info, parts: &[Part]) -> Document {
+    let mut out = Document::new();
+    if let Some(first) = parts.first() {
+        out.styles = first.doc.styles.clone();
+        out.last_section = first.doc.last_section.clone();
+    }
+    out.last_section.headers = HeaderSet::default();
+    out.last_section.footers = HeaderSet::default();
+    let toc: Vec<(String, String, usize)> = parts.iter().map(|p| (p.number.clone(), p.title.clone(), p.pages)).collect();
+    out.body.clear();
+    put_contents(&mut out, info, &toc);
+    // The contents' section is the document's last: no empty page after it.
+    if let Some(b) = out.body.last_mut()
+        && let Block::Para(p) = Arc::make_mut(b)
+        && let Some(sect) = p.section.take()
+    {
+        out.last_section = *sect;
+        p.touch();
+    }
+    out.ensure_nonempty();
+    out
+}
+
 fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
     let path = PathBuf::from(p::req_str(v, "path")?);
     let formats: &[&str] = match p::str(v, "format").unwrap_or("pdf") {
@@ -212,7 +303,12 @@ fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
         "both" => &["pdf", "docx"],
         other => return Err(CmdError::Params(format!("`format` must be \"pdf\", \"docx\" or \"both\", not {other:?}"))),
     };
-    let restart = match p::str(v, "pageNumbers").unwrap_or("restart") {
+    let f0 = project::load(&path)?;
+    let opts = match v.get("print") {
+        Some(c) if !c.is_null() => f0.print.merged(c)?,
+        _ => f0.print.clone(),
+    };
+    let restart = match p::str(v, "pageNumbers").unwrap_or(opts.page_numbers.as_str()) {
         "restart" => true,
         "continue" => false,
         other => return Err(CmdError::Params(format!("`pageNumbers` must be \"restart\" or \"continue\", not {other:?}"))),
@@ -231,20 +327,27 @@ fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
     }
     let name = match p::str(v, "name").map(str::trim).filter(|n| !n.is_empty()) {
         Some(n) => n.to_string(),
-        None => format!("{} - Project Manual{}", if f.project.name.trim().is_empty() { "Project" } else { f.project.name.trim() }, form.suffix()),
+        None => format!(
+            "{} - {}{}{}",
+            if f.project.name.trim().is_empty() { "Project" } else { f.project.name.trim() },
+            if p::bool(v, "contentsOnly") == Some(true) { "Table of Contents" } else { "Project Manual" },
+            form.suffix(),
+            if opts.draft { " (Draft)" } else { "" }
+        ),
     };
     if name.chars().count() > 150 || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
         return Err(CmdError::Params(format!("{name:?} can't be a file name")));
     }
     let mut parts = Vec::new();
     let mut skipped = Vec::new();
-    for sec in f.sections.iter().filter(|x| x.included) {
+    let division = p::str(v, "division").map(project::number_key_prefix);
+    for sec in f.sections.iter().filter(|x| x.included && division.as_ref().is_none_or(|d| number_key(&x.number).starts_with(d.as_str()))) {
         let full = dir.join(&sec.file);
         let opened = crate::io::read_document(&full).and_then(|b| crate::io::open_bytes(&sec.file, &b)).map_err(CmdError::Failed);
         let issued = opened.and_then(|doc| {
             let mut sess = Session::new(doc);
             sess.path = Some(full.clone());
-            output::issued_copy_as(&sess, Some(&path.to_string_lossy()), form)
+            output::issued_copy_with(&sess, Some(&path.to_string_lossy()), form, v.get("print"))
         });
         match issued {
             Ok(mut i) => {
@@ -259,8 +362,9 @@ fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
         return Err(CmdError::Failed("no included section could be read for the manual".into()));
     }
     let listed: Vec<Value> = parts.iter().map(|p| json!({"file": p.file, "number": p.number, "title": p.title, "pages": p.pages})).collect();
-    let contents = p::bool(v, "contents").unwrap_or(true);
-    let manual = build(&f.project, parts, contents, restart)?;
+    let contents = p::bool(v, "contents").unwrap_or(opts.contents);
+    let layout = Layout { contents, restart, odd: opts.odd_pages.then(|| (opts.blank_page_text.clone(), opts.blank_page_furniture)) };
+    let manual = if p::bool(v, "contentsOnly") == Some(true) { contents_only(&f.project, &parts) } else { build(&f.project, parts, &layout)? };
     let pages = output::page_count(&manual);
     crate::io::create_dir_all(&out_dir).map_err(CmdError::Failed)?;
     let mut written = serde_json::Map::new();

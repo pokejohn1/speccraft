@@ -60,7 +60,7 @@ pub fn units(doc: &Document) -> Units {
     }
 }
 
-fn units_cmd(s: &mut Session, v: &Value) -> CmdResult {
+pub(crate) fn units_cmd(s: &mut Session, v: &Value) -> CmdResult {
     match v.get("value").and_then(Value::as_str) {
         None => {}
         Some("both") => {

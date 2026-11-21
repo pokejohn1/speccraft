@@ -22,10 +22,12 @@ pub mod manual;
 pub mod output;
 pub mod overview;
 pub mod paragraphs;
+pub mod print;
 pub mod project;
 pub mod quality;
 pub mod rules;
 pub mod sections;
+pub mod terms;
 pub mod units;
 pub mod update;
 
@@ -56,11 +58,13 @@ pub fn specs() -> Vec<CommandSpec> {
     v.extend(output::specs());
     v.extend(overview::specs());
     v.extend(paragraphs::specs());
+    v.extend(print::specs());
     v.extend(project::specs());
     v.extend(quality::specs());
     v.extend(rules::specs());
     v.extend(update::specs());
     v.extend(units::specs());
+    v.extend(terms::specs());
     v
 }
 

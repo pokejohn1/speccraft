@@ -123,22 +123,26 @@ fn from_master(doc: &Document) -> Option<BTreeMap<String, Original>> {
 /// A paragraph's text as the comparison sees it: fill-ins put back to the master's wording,
 /// objects left out, whitespace runs as one space.
 pub fn base_text(doc: &Document, e: &Entry) -> String {
-    base_text_with(doc, e, &fields::fields(doc))
+    base_text_with(doc, e, &super::terms::originals_list(doc))
 }
 
 /// [`base_text`] with the document's fields already listed.
-fn base_text_with(doc: &Document, e: &Entry, all: &[fields::Field]) -> String {
+fn base_text_with(doc: &Document, e: &Entry, all: &[(wordcraft_doc::control::ControlRange, String)]) -> String {
     let Some(para) = doc.para_at(&e.range.start) else { return String::new() };
     let block = e.range.start.path.0.first().copied();
     let (from, to) = (e.range.content_start().off, e.range.end.off);
-    let mut fs: Vec<&fields::Field> = all.iter().filter(|f| f.range.start.path.0.first().copied() == block).collect();
-    fs.sort_by_key(|f| f.range.start.off);
+    let mut fs: Vec<&(wordcraft_doc::control::ControlRange, String)> = all.iter().filter(|(r, _)| r.start.path.0.first().copied() == block).collect();
+    fs.sort_by_key(|(r, _)| r.start.off);
     let mut out = String::new();
     let mut at = from;
-    for f in fs.iter().filter(|f| f.range.start.off >= from && f.range.end.off <= to) {
-        out.push_str(para.text.get(at..f.range.start.off).unwrap_or(""));
-        out.push_str(&f.original);
-        at = f.range.end.off + OBJ.len_utf8();
+    for (r, original) in fs.iter().filter(|(r, _)| r.start.off >= from && r.end.off <= to) {
+        // Nested controls (a term inside a choice) are covered by the outer one.
+        if r.start.off < at {
+            continue;
+        }
+        out.push_str(para.text.get(at..r.start.off).unwrap_or(""));
+        out.push_str(original);
+        at = r.end.off + OBJ.len_utf8();
     }
     out.push_str(para.text.get(at.min(to)..to).unwrap_or(""));
     normal(&out)
@@ -159,7 +163,7 @@ pub fn record_originals(doc: &mut Document) {
     if entries.is_empty() {
         return;
     }
-    let all = fields::fields(doc);
+    let all = super::terms::originals_list(doc);
     let map: BTreeMap<String, Original> = entries
         .iter()
         .map(|e| {
@@ -187,7 +191,7 @@ pub fn origins(doc: &Document) -> (Vec<(Entry, Origin)>, Vec<(String, Original)>
     let orig = originals(doc);
     let base = baseline(doc);
     let entries = sections::outline(doc);
-    let all = fields::fields(doc);
+    let all = super::terms::originals_list(doc);
     let present: std::collections::HashSet<&str> = entries.iter().map(|e| e.id.as_str()).collect();
     let mut out = Vec::new();
     for e in &entries {

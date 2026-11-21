@@ -48,7 +48,7 @@ pub fn auto_select(doc: &Document) -> bool {
     doc.custom_prop(AUTO_SELECT_PROP).is_none_or(|v| !v.trim().eq_ignore_ascii_case("off"))
 }
 
-fn auto_select_cmd(s: &mut Session, v: &Value) -> CmdResult {
+pub(crate) fn auto_select_cmd(s: &mut Session, v: &Value) -> CmdResult {
     let want = match v.get("value") {
         None | Some(Value::Null) => !auto_select(&s.doc),
         Some(x) => x.as_bool().ok_or_else(|| CmdError::Params("`value` must be true or false".into()))?,
