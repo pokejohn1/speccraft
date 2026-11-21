@@ -616,6 +616,9 @@ fn main() -> eframe::Result {
             let mut app = WordApp::new(session, services(file_dialog, &cc.egui_ctx));
             app.set_startup_update_check(true);
             load_prefs(&mut app);
+            // Speccraft: no floating mini toolbar while editing, whatever the saved preference
+            // says (File › Options can still show it for the session).
+            app.ui.mini_toolbar = false;
             // After the preferences, so the reason it gives is in the interface language.
             if updates_unsafe {
                 app.disable_self_update();

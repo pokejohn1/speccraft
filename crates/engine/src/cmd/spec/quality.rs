@@ -71,6 +71,18 @@ fn editing_mark(text: &str) -> Option<&'static str> {
     }
 }
 
+/// A Part's name without a typed "PART 1" in front ("PART 1  GENERAL" → "GENERAL").
+fn part_name(text: &str) -> String {
+    let t = text.trim();
+    let rest = match t.get(..5) {
+        Some(h) if h.eq_ignore_ascii_case("part ") => {
+            t.get(5..).unwrap_or("").trim_start_matches(|c: char| c.is_ascii_digit() || c.is_whitespace() || matches!(c, '-' | '–' | '—' | '.' | ':'))
+        }
+        _ => t,
+    };
+    rest.trim().to_string()
+}
+
 /// Square-bracketed text, such as `[Owner]`, as (start char, the text with brackets).
 fn brackets(text: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -173,7 +185,7 @@ fn headings(entries: &[Entry], texts: &[String], out: &mut Vec<Value>) {
         }
         // A Part needs an Article (or text) under it, except one marked "(Not Used)".
         let has_child = entries.iter().any(|c| c.on && c.parent == Some(i) && c.kind != Kind::Note);
-        let text = texts.get(i).map_or("", |t| t.trim());
+        let text = part_name(texts.get(i).map_or("", |t| t.as_str()));
         if e.on && e.kind == Kind::Part && !has_child && !text.to_lowercase().contains("not used") {
             out.push(finding("warning", "emptyHeading", Some(&e.id), format!("PART {text} has nothing printing under it")));
         }
@@ -183,7 +195,7 @@ fn headings(entries: &[Entry], texts: &[String], out: &mut Vec<Value>) {
         .iter()
         .enumerate()
         .filter(|(_, e)| e.kind == Kind::Part)
-        .map(|(i, _)| (i, texts.get(i).map_or(String::new(), |t| t.trim().to_uppercase())))
+        .map(|(i, _)| (i, part_name(texts.get(i).map_or("", |t| t.as_str())).to_uppercase()))
         .collect();
     let three = ["GENERAL", "PRODUCTS", "EXECUTION"];
     if parts.iter().any(|(_, t)| three.iter().any(|w| t.starts_with(w))) {
@@ -412,5 +424,9 @@ mod tests {
         assert_eq!(super::editing_mark("Outbound"), None);
         assert!(super::drafting_note("Retain for wet areas"));
         assert!(!super::drafting_note("Retaining walls are excluded."));
+        assert_eq!(super::part_name("PART 1  GENERAL"), "GENERAL");
+        assert_eq!(super::part_name("Part 2 - Products"), "Products");
+        assert_eq!(super::part_name("EXECUTION"), "EXECUTION");
+        assert_eq!(super::part_name("PARTITIONS"), "PARTITIONS");
     }
 }

@@ -355,8 +355,8 @@ fn duplicate_cmd(s: &mut Session, v: &Value) -> CmdResult {
 }
 
 /// The style of the next level down: Part → Article → PR1 … PR5.
-fn child_style(style: &str) -> Option<&'static str> {
-    match style.to_ascii_uppercase().as_str() {
+fn child_style(style: &str) -> Option<String> {
+    let known = match style.to_ascii_uppercase().as_str() {
         "SCT" => Some("PRT"),
         "PRT" => Some("ART"),
         "ART" => Some("PR1"),
@@ -365,7 +365,13 @@ fn child_style(style: &str) -> Option<&'static str> {
         "PR3" => Some("PR4"),
         "PR4" => Some("PR5"),
         _ => None,
+    };
+    if let Some(k) = known {
+        return Some(k.to_string());
     }
+    // A level-numbered style ("CSILevel3"): the same name, one level down.
+    let n = sections::style_level(style)?;
+    (n < 9).then(|| format!("{}{}", style.get(..style.len().saturating_sub(1)).unwrap_or(""), n + 1))
 }
 
 fn add_cmd(s: &mut Session, v: &Value) -> CmdResult {
@@ -380,9 +386,10 @@ fn add_cmd(s: &mut Session, v: &Value) -> CmdResult {
     let child = p::bool(v, "child") == Some(true);
     let (style, at) = if child {
         let st = child_style(&style).ok_or_else(|| CmdError::Failed(format!("a {style:?} paragraph has no level below it")))?;
-        (st.to_string(), e.range.start.path.0.first().map_or(0, |b| *b as usize + 1))
+        (st, e.range.start.path.0.first().map_or(0, |b| *b as usize + 1))
     } else if matches!(e.kind, Kind::Title) {
-        ("PRT".to_string(), e.range.start.path.0.first().map_or(0, |b| *b as usize + 1))
+        let part = child_style(&style).unwrap_or_else(|| "PRT".to_string());
+        (part, e.range.start.path.0.first().map_or(0, |b| *b as usize + 1))
     } else if matches!(e.kind, Kind::End) {
         return Err(CmdError::Failed("nothing comes after the end of section".into()));
     } else {
