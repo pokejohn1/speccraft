@@ -675,6 +675,13 @@ fn add_section(_: &mut Session, v: &Value) -> CmdResult {
                 None => file_name(&master.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())?,
             };
             let target = dir.join(&file);
+            // A master kept in the project's own folder: its copy would land on it.
+            let same_folder = master.parent().and_then(|m| m.canonicalize().ok()).is_some_and(|m| dir.canonicalize().ok().as_ref() == Some(&m));
+            if same_folder && target.exists() {
+                return Err(CmdError::Failed(format!(
+                    "{file} is a master in the project's own folder, so its copy would replace it. Keep the project in a folder of its own (New Project makes one when you choose a folder of masters), or give another `file` name"
+                )));
+            }
             if target.exists() {
                 return Err(CmdError::Failed(format!("{} already exists in the project folder: give another `file` name", file)));
             }

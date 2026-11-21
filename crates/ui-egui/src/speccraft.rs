@@ -355,8 +355,41 @@ fn new_project(app: &mut WordApp, mut path: PathBuf, name: Option<String>) -> Re
         path.set_extension("speccraft");
     }
     let name = name.unwrap_or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+    // The project gets a folder of its own, named after it, for its file and its section copies
+    // (so copies never sit beside or over their masters). An empty folder, or one already named
+    // after the project, is used as it is. A folder of masters becomes the project's library.
+    let chosen = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Project".into());
+    let masters = folder_of_masters(&chosen);
+    let named = chosen.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&stem));
+    if !named && !folder_is_empty(&chosen) {
+        let own = chosen.join(&stem);
+        wordcraft_engine::io::create_dir_all(&own)?;
+        path = own.join(path.file_name().unwrap_or_default());
+    }
     app.run("spec.project.new", json!({"path": path.to_string_lossy(), "name": name}))?;
-    open_project(app, path)
+    if masters {
+        app.run("spec.project.set", json!({"path": path.to_string_lossy(), "library": chosen.to_string_lossy()}))?;
+    }
+    let r = open_project(app, path.clone())?;
+    let folder = path.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let note = if masters { tl!("Project folder: {folder}. The masters beside it are its library") } else { tl!("Project folder: {folder}") };
+    app.status(crate::i18n::fmt(note, &[("folder", &folder)]));
+    Ok(r)
+}
+
+/// A folder with nothing in it (or that doesn't exist yet).
+fn folder_is_empty(dir: &Path) -> bool {
+    wordcraft_engine::io::list_dir(dir, 10).map_or(true, |(entries, _)| entries.iter().all(|e| e.name.starts_with('.')))
+}
+
+/// A folder holding Word files and no project: a folder of masters.
+fn folder_of_masters(dir: &Path) -> bool {
+    let Ok((entries, _)) = wordcraft_engine::io::list_dir(dir, 5_000) else { return false };
+    let ext = |e: &wordcraft_engine::io::DirEntry, x: &str| Path::new(&e.name).extension().is_some_and(|v| v.eq_ignore_ascii_case(x));
+    let docx = entries.iter().any(|e| !e.dir && ext(e, "docx") && !e.name.starts_with("~$"));
+    let project = entries.iter().any(|e| !e.dir && ext(e, "speccraft"));
+    docx && !project
 }
 
 fn add_section(app: &mut WordApp, master: &str) -> Result<Value, String> {
@@ -740,6 +773,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A project saved in a folder of masters gets a folder of its own, and adding sections works.
+    #[test]
+    fn a_new_project_gets_its_own_folder() {
+        let dir = scratch("own-folder");
+        for (n, t, f) in [("01 1000", "SUMMARY", "011000-RIB-Summary.docx"), ("09 2900", "GYPSUM BOARD", "092900-RIB-Gypsum.docx")] {
+            wordcraft_engine::io::save_path(&dir.join(f), &master(n, t)).unwrap();
+        }
+        let mut a = app();
+        a.run("ui.spec.newProject", json!({"path": dir.join("Project3.speccraft").to_string_lossy()})).unwrap();
+        let own = dir.join("Project3");
+        assert_eq!(a.speccraft.project.as_deref(), Some(own.join("Project3.speccraft").as_path()));
+        assert_eq!(a.speccraft.info.as_ref().unwrap()["library"], dir.to_string_lossy().as_ref(), "the masters are its library");
+        a.run("ui.spec.addSection", json!({"master": dir.join("011000-RIB-Summary.docx").to_string_lossy()})).unwrap();
+        assert!(own.join("011000-RIB-Summary.docx").is_file(), "the copy is in the project's folder");
+        assert!(
+            wordcraft_engine::io::open_path(&dir.join("011000-RIB-Summary.docx")).unwrap().custom_prop("Speccraft.Role").is_none(),
+            "the master is untouched"
+        );
+        // An empty folder is used as it is.
+        let empty = scratch("own-folder-empty");
+        let mut b = app();
+        b.run("ui.spec.newProject", json!({"path": empty.join("P.speccraft").to_string_lossy()})).unwrap();
+        assert_eq!(b.speccraft.project.as_deref(), Some(empty.join("P.speccraft").as_path()));
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&empty).unwrap();
     }
 
     #[test]
