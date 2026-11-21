@@ -93,6 +93,8 @@ impl WordApp {
                 crate::language_packs::bar(self, ui);
                 chrome::status_bar(self, ui);
                 panes::show(self, ui);
+                // Speccraft fork: section tabs above the page (M15).
+                crate::speccraft::tabs::strip(self, ui);
             }
             if moved(self) {
                 return;

@@ -22,6 +22,7 @@ pub(crate) mod library;
 pub(crate) mod marks;
 pub(crate) mod outline;
 pub(crate) mod rules_view;
+pub(crate) mod tabs;
 pub(crate) mod updates;
 
 /// What the Specs tab and Sections pane keep between frames.
@@ -70,6 +71,8 @@ pub struct SpecUi {
     pub(crate) publish_blocked: Option<&'static str>,
     /// What Publish and Project Manual write: `pdf` (default), `docx` or `both` (M13).
     pub(crate) publish_format: String,
+    /// Open section tabs, the one used last at the end (M15).
+    pub(crate) tab_order: Vec<u64>,
     /// The Updates view (M11).
     pub(crate) update: updates::UpdateUi,
     /// The Master Library pane (M9).
@@ -153,6 +156,22 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
             let file = s("file").ok_or("`file` must name a section file of the project")?;
             open_section(app, &file)
         }
+        "ui.spec.tab" => {
+            let tab = p.get("id").and_then(Value::as_u64).ok_or("`id` must be an open tab")?;
+            tabs::switch(app, tab)?;
+            Ok(json!({"id": tab}))
+        }
+        "ui.spec.closeTab" => {
+            let tab = p.get("id").and_then(Value::as_u64).unwrap_or_else(|| app.session.document_id());
+            tabs::close(app, tab)?;
+            Ok(json!({"closed": tab, "tabs": app.session.documents().len()}))
+        }
+        "ui.spec.followReference" => {
+            let (number, file) =
+                tabs::reference_at_caret(app).ok_or_else(|| tl!("No section is named at the caret (as in \"Section 07 9200\")").to_string())?;
+            let file = file.ok_or_else(|| crate::i18n::fmt(tl!("Section {n} is not in this project"), &[("n", &number)]))?;
+            open_section(app, &file)
+        }
         "ui.spec.goTo" => {
             let file = s("file").ok_or("`file` must name a section file of the project")?;
             let shown = app.session.path.as_deref().and_then(Path::file_name).is_some_and(|n| n.to_string_lossy() == file.as_str());
@@ -181,6 +200,8 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
         }
         "ui.spec.check" => {
             let path = project_path(app)?;
+            // It reads the section files: open sections with changes are saved first.
+            save_if_changed(app)?;
             let r = app.run("spec.project.validate", json!({"path": path}))?;
             app.speccraft.publish_blocked = None;
             app.speccraft.findings = Some(r.clone());
@@ -327,11 +348,11 @@ fn save_if_changed(app: &mut WordApp) -> Result<(), String> {
     if app.session.dirty && app.session.path.is_some() {
         app.run("file.save", json!({}))?;
     }
-    Ok(())
+    // Sections waiting in other tabs too (M15): the project's checks and outputs read the files.
+    tabs::save_sections(app)
 }
 
-/// Show section `file` of the project in this window: the section on screen is saved first if
-/// it changed. An untitled document with changes is left alone (nothing is lost).
+/// Show section `file` of the project in a tab of its own (M15), or its tab if it is open.
 fn open_section(app: &mut WordApp, file: &str) -> Result<Value, String> {
     let project = app.speccraft.project.clone().ok_or("open a project first")?;
     let folder = project.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -349,15 +370,12 @@ fn open_section(app: &mut WordApp, file: &str) -> Result<Value, String> {
     if app.session.path.as_deref() == Some(path.as_path()) {
         return Ok(json!({"path": path.to_string_lossy(), "alreadyOpen": true}));
     }
-    save_if_changed(app)?;
-    if app.session.dirty {
-        return Err(tl!("Save or close the open document first").to_string());
+    // In a tab of its own (M15): the section on screen keeps its changes in its tab.
+    let was_open = tabs::open(app, &path)?;
+    if !was_open {
+        app.status(crate::i18n::fmt(tl!("Opened {file}"), &[("file", file)]));
     }
-    let doc = wordcraft_engine::io::open_path(&path)?;
-    app.replace_startup_document(doc);
-    app.session.path = Some(path.clone());
-    app.status(crate::i18n::fmt(tl!("Opened {file}"), &[("file", file)]));
-    Ok(json!({"path": path.to_string_lossy(), "alreadyOpen": false}))
+    Ok(json!({"path": path.to_string_lossy(), "alreadyOpen": was_open}))
 }
 
 /// The project's files in order with `file` moved `by` places, or `None` if it can't move.
@@ -407,6 +425,7 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
         big(ui, app, "compare", "Master\nUpdates", "ui.spec.outlinePane", json!({"value": true, "view": "updates"}), false);
         big(ui, app, "readMode", "Printed\nView", "ui.spec.outlinePane", json!({"value": true, "view": "printed"}), false);
         big(ui, app, "export", "Export\nPDF", "spec.exportPdf", json!({}), false);
+        big(ui, app, "link", "Go to\nSection", "ui.spec.followReference", json!({}), false);
         big(ui, app, "saveAs", "Export\nWord", "spec.exportDocx", json!({}), false);
     });
     group(ui, "Edits", None, app, |ui, app| {
@@ -694,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn sections_open_in_the_same_window_and_changes_are_saved_first() {
+    fn sections_open_in_tabs_and_changes_are_saved_before_checking() {
         let dir = scratch("switch");
         let project = dir.join("Riverside.speccraft");
         let mut a = app();
@@ -710,12 +729,16 @@ mod tests {
         assert_eq!(a.session.path.as_deref(), Some(dir.join("m-sealants.docx").as_path()));
         let docs = a.session.documents().len();
 
-        // A change in the section on screen is saved before another is shown, in the same window.
+        // Both sections are open in tabs (M15): showing the other one keeps the change in its tab.
         a.run("text.insert", json!({"text": "Edited. "})).unwrap();
         assert!(a.session.dirty);
         a.run("ui.spec.openSection", json!({"file": "m-gypsum.docx"})).unwrap();
         assert_eq!(a.session.path.as_deref(), Some(dir.join("m-gypsum.docx").as_path()));
-        assert_eq!(a.session.documents().len(), docs, "no new window or document");
+        assert_eq!(a.session.documents().len(), docs, "its tab was open: no new document");
+        let saved = wordcraft_engine::io::open_path(&dir.join("m-sealants.docx")).unwrap();
+        assert!(!saved.plain_text(wordcraft_doc::StoryRef::Body).contains("Edited. "), "waiting in its tab");
+        // Checking the project saves the open sections first.
+        a.run("ui.spec.check", json!({})).unwrap();
         let saved = wordcraft_engine::io::open_path(&dir.join("m-sealants.docx")).unwrap();
         assert!(saved.plain_text(wordcraft_doc::StoryRef::Body).contains("Edited. "));
 

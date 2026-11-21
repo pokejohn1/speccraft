@@ -53,6 +53,16 @@ impl WordApp {
         if self.windows.native() && self.follow_in_windows(id) {
             return;
         }
+        self.show_here(id);
+    }
+
+    /// Show document `id` in the drawn window, in place of the one it showed, whether or not
+    /// windows are native: its own state comes back and the window's starts afresh. The Speccraft
+    /// fork's section tabs (M15) switch documents this way, so a tab never opens a window.
+    pub(crate) fn show_here(&mut self, id: u64) {
+        if id == self.shown_document && self.session.document_id() == id {
+            return;
+        }
         let left = std::mem::replace(&mut self.shown_document, id);
         let seen = self.carry_document_state(left, id);
         self.window_shows(id);

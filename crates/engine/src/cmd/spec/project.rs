@@ -790,7 +790,7 @@ fn finding(severity: &str, code: &str, file: Option<&str>, message: String) -> V
 }
 
 /// Section numbers referred to in `text` as "Section 07 9200" (or "Section 079200").
-fn referenced_sections(text: &str) -> Vec<String> {
+pub fn referenced_sections(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let low = text.to_lowercase();
     let mut from = 0;
