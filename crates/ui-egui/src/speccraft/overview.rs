@@ -281,6 +281,14 @@ mod tests {
         assert!(!super::keep("master", &r["sections"][0]));
         a.run("ui.spec.overview", json!({"value": false})).unwrap();
         assert!(!a.speccraft.overview.open);
+        // M16: publishing in the short form, without what is left out of it.
+        a.run("spec.short.set", json!({"id": "p0004", "leave": true})).unwrap();
+        a.speccraft.publish_form = wordcraft_engine::cmd::spec::forms::Form::Short;
+        let r = a.run("ui.spec.publish", json!({"force": true, "format": "docx"})).unwrap();
+        let file = r["sections"][0]["docx"].as_str().unwrap().to_string();
+        assert!(file.ends_with("092900 (Short Form).docx"), "{file}");
+        let back = wordcraft_engine::io::open_path(std::path::Path::new(&file)).unwrap();
+        assert!(!back.plain_text(wordcraft_doc::StoryRef::Body).contains("Provide"), "left out of the short form");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

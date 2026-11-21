@@ -71,6 +71,12 @@ pub struct SpecUi {
     /// The last Publish or Project Manual stopped at errors: which (the report offers to go
     /// ahead anyway).
     pub(crate) publish_blocked: Option<&'static str>,
+    /// The form the Printed view shows, and the form Publish and Project Manual write (M16).
+    pub(crate) print_form: wordcraft_engine::cmd::spec::forms::Form,
+    pub(crate) publish_form: wordcraft_engine::cmd::spec::forms::Form,
+    /// `spec.short.list`, per revision; the short wording being typed (M16).
+    pub(crate) short_cache: Option<((u64, u64), Value)>,
+    pub(crate) short_draft: Option<(String, String)>,
     /// What Publish and Project Manual write: `pdf` (default), `docx` or `both` (M13).
     pub(crate) publish_format: String,
     /// Open section tabs, the one used last at the end (M15).
@@ -138,6 +144,9 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
                     "updates" => outline::View::Updates,
                     _ => outline::View::Outline,
                 };
+            }
+            if p.get("form").is_some() {
+                app.speccraft.print_form = wordcraft_engine::cmd::spec::forms::Form::from_params(p).map_err(|e| e.to_string())?;
             }
             Ok(json!({"open": app.speccraft.outline_open}))
         }
@@ -233,7 +242,12 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
                 .unwrap_or_else(|| if app.speccraft.publish_format.is_empty() { "pdf".into() } else { app.speccraft.publish_format.clone() });
             let (engine, which) =
                 if id == "ui.spec.manual" { ("spec.project.manual", "ui.spec.manual") } else { ("spec.project.publish", "ui.spec.publish") };
-            let r = match app.run(engine, json!({"path": path, "force": force, "format": format})) {
+            let form = app.speccraft.publish_form;
+            let depth = if let wordcraft_engine::cmd::spec::forms::Form::Outline(d) = form { d } else { 1 };
+            let form_name = s("form").unwrap_or_else(|| form.name().to_string());
+            let args =
+                json!({"path": path, "force": force, "format": format, "form": form_name, "depth": p.get("depth").cloned().unwrap_or(json!(depth))});
+            let r = match app.run(engine, args) {
                 Ok(r) => r,
                 Err(e) => {
                     // Stopped by errors: show them, with a way to go ahead anyway beside them.
@@ -542,6 +556,7 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
             "both" => tl!("PDF and Word"),
             _ => tl!("PDF"),
         };
+        outline::form_choice(ui, "spec_publish_form", &mut app.speccraft.publish_form);
         craft_ui::ComboBox::from_id_salt("spec_publish_format").selected_text(label(&fmt)).show_ui(ui, |ui| {
             for f in ["pdf", "docx", "both"] {
                 if ui.selectable_label(fmt == f, label(f)).clicked() {

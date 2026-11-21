@@ -25,10 +25,10 @@ const LOC: &str = "Specs › Print";
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("spec.exportPdf", "Export Printable PDF", LOC, export_pdf)
-            .params(r#"{"path"?: string (a .pdf file; default: the section file's own path with .pdf), "project"?: string (a .speccraft file whose values fill placeholders; default: the only one in the section's folder)}"#)
+            .params(r#"{"path"?: string (a .pdf file; default: the section file's own path with .pdf), "project"?: string (a .speccraft file whose values fill placeholders; default: the only one in the section's folder), "form"?: "full" (default), "short" or "outline", "depth"?: n (outline: paragraph levels below the Article, default 1)}"#)
             .pure(),
         CommandSpec::new("spec.exportDocx", "Export to Word", LOC, export_docx)
-            .params(r#"{"path"?: string (a .docx file; default: "<section> (issued).docx" beside the section file), "project"?: string (as for spec.exportPdf)}"#)
+            .params(r#"{"path"?: string (a .docx file; default: "<section> (issued).docx" beside the section file), "project"?: string, "form"?: string, "depth"?: n (as for spec.exportPdf)}"#)
             .pure(),
     ]
 }
@@ -59,12 +59,19 @@ pub struct Counts {
 /// note prints (an unmanaged note never prints). Section breaks on paragraphs left out move to the nearest earlier
 /// paragraph kept, so page setup, headers and footers survive.
 pub fn printable_copy(doc: &Document) -> Result<(Document, Counts), CmdError> {
+    printable_copy_as(doc, super::forms::Form::Full)
+}
+
+/// [`printable_copy`] in a form (M16): the short form leaves out what the author marked and uses
+/// their short wording; the outline also stops at its depth.
+pub fn printable_copy_as(doc: &Document, form: super::forms::Form) -> Result<(Document, Counts), CmdError> {
     let entries = sections::outline(doc);
     if entries.is_empty() {
         return Err(CmdError::Failed("this document has no spec paragraphs yet: run spec.import first".into()));
     }
     let top = |e: &sections::Entry| e.range.start.path.0.first().copied();
-    let prints: HashSet<u32> = sections::printable(doc).iter().filter_map(top).collect();
+    let left_out = super::forms::left_out(doc, &entries, form);
+    let prints: HashSet<u32> = sections::printable(doc).iter().filter(|e| !left_out.contains(&e.id)).filter_map(top).collect();
     let managed: HashMap<u32, bool> = entries.iter().filter_map(top).map(|b| (b, prints.contains(&b))).collect();
     let mut c = Counts { notes: entries.iter().filter(|e| e.kind == Kind::Note).count(), ..Default::default() };
     c.printed = managed.values().filter(|p| **p).count();
@@ -128,6 +135,8 @@ pub fn printable_copy(doc: &Document) -> Result<(Document, Counts), CmdError> {
     let mut out = doc.clone();
     out.body = kept;
     out.ensure_nonempty();
+    // The author's short wording, in the short and outline forms.
+    super::forms::apply_wording(&mut out, &super::forms::marks(doc), form)?;
     // Fill-ins: left-out text goes; open ones print as written and are reported.
     c.fields_open = super::fields::resolve_for_print(&mut out);
     Ok((out, c))
@@ -140,9 +149,13 @@ fn target(s: &Session, v: &Value, ext: &str) -> Result<PathBuf, CmdError> {
         None | Some(Value::Null) => s
             .path
             .as_ref()
-            .map(|p| match ext {
-                "pdf" => p.with_extension("pdf"),
-                _ => p.with_file_name(format!("{} (issued).{ext}", p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())),
+            .map(|p| {
+                let stem = p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let form = super::forms::Form::from_params(v).map(|f| f.suffix()).unwrap_or("");
+                match ext {
+                    "pdf" => p.with_file_name(format!("{stem}{form}.pdf")),
+                    _ => p.with_file_name(format!("{stem}{form} (issued).{ext}")),
+                }
             })
             .ok_or_else(|| CmdError::Params(format!("this document has not been saved yet: give `path` (a .{ext} file to write)")))?,
         Some(Value::String(p)) => PathBuf::from(p),
@@ -167,7 +180,12 @@ pub struct Issued {
 }
 
 pub fn issued_copy(s: &Session, project: Option<&str>) -> Result<Issued, CmdError> {
-    let (mut copy, mut c) = printable_copy(&s.doc)?;
+    issued_copy_as(s, project, super::forms::Form::Full)
+}
+
+/// [`issued_copy`] in a form (M16).
+pub fn issued_copy_as(s: &Session, project: Option<&str>, form: super::forms::Form) -> Result<Issued, CmdError> {
+    let (mut copy, mut c) = printable_copy_as(&s.doc, form)?;
     let mut warnings = Vec::new();
     // Placeholders such as <Insert Project Name> take the project's values, in the copy only.
     let mut filled = 0;
@@ -259,7 +277,7 @@ fn report(path: &str, bytes: usize, pages: usize, i: &Issued) -> Value {
 /// Write a PDF of the paragraphs that print. Changes nothing in the document.
 fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
     let path = target(s, v, "pdf")?;
-    let issued = issued_copy(s, crate::p::str(v, "project"))?;
+    let issued = issued_copy_as(s, crate::p::str(v, "project"), super::forms::Form::from_params(v)?)?;
     let pages = page_count(&issued.copy);
     let bytes = crate::io::save_bytes_opts("printable.pdf", &issued.copy, &crate::io::ExportOptions::default()).map_err(CmdError::Failed)?;
     let shown = path.to_string_lossy().to_string();
@@ -271,7 +289,7 @@ fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
 /// Changes nothing in the document.
 fn export_docx(s: &mut Session, v: &Value) -> CmdResult {
     let path = target(s, v, "docx")?;
-    let mut issued = issued_copy(s, crate::p::str(v, "project"))?;
+    let mut issued = issued_copy_as(s, crate::p::str(v, "project"), super::forms::Form::from_params(v)?)?;
     let removed = strip_markings(&mut issued.copy);
     let pages = page_count(&issued.copy);
     let bytes = crate::io::save_bytes_opts("issued.docx", &issued.copy, &crate::io::ExportOptions::default()).map_err(CmdError::Failed)?;

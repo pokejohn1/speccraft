@@ -16,6 +16,7 @@ use crate::{CmdError, CmdResult, CommandSpec, Selection, Session, p};
 
 pub mod edits;
 pub mod fields;
+pub mod forms;
 pub mod library;
 pub mod manual;
 pub mod output;
@@ -47,6 +48,7 @@ pub fn specs() -> Vec<CommandSpec> {
     v.extend(sections::specs());
     v.extend(edits::specs());
     v.extend(fields::specs());
+    v.extend(forms::specs());
     v.extend(library::specs());
     v.extend(manual::specs());
     v.extend(output::specs());

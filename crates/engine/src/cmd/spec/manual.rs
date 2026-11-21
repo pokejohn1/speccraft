@@ -29,7 +29,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("spec.project.manual", "Publish Project Manual", LOC, manual_cmd)
             .params(
-                r#"{"path": string (the project's .speccraft file), "format"?: "pdf" (default), "docx" or "both", "name"?: string (file name without extension; default "<project name> - Project Manual"), "folder"?: string (default: Published beside the project file), "contents"?: bool (table of contents first; default true), "pageNumbers"?: "restart" (default: each section from 1) or "continue", "force"?: bool (publish even when Check Project finds errors)}"#,
+                r#"{"path": string (the project's .speccraft file), "format"?: "pdf" (default), "docx" or "both", "name"?: string (file name without extension; default "<project name> - Project Manual"), "folder"?: string (default: Published beside the project file), "contents"?: bool (table of contents first; default true), "pageNumbers"?: "restart" (default: each section from 1) or "continue", "force"?: bool (publish even when Check Project finds errors), "form"?: "full" (default), "short" or "outline", "depth"?: n}"#,
             )
             .pure(),
     ]
@@ -217,6 +217,7 @@ fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
         "continue" => false,
         other => return Err(CmdError::Params(format!("`pageNumbers` must be \"restart\" or \"continue\", not {other:?}"))),
     };
+    let form = super::forms::Form::from_params(v)?;
     let checked = s.run("spec.project.validate", &json!({"path": path.to_string_lossy()}))?;
     let errors = checked.get("errors").and_then(Value::as_u64).unwrap_or(0);
     if errors > 0 && !p::bool(v, "force").unwrap_or(false) {
@@ -230,7 +231,7 @@ fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
     }
     let name = match p::str(v, "name").map(str::trim).filter(|n| !n.is_empty()) {
         Some(n) => n.to_string(),
-        None => format!("{} - Project Manual", if f.project.name.trim().is_empty() { "Project" } else { f.project.name.trim() }),
+        None => format!("{} - Project Manual{}", if f.project.name.trim().is_empty() { "Project" } else { f.project.name.trim() }, form.suffix()),
     };
     if name.chars().count() > 150 || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
         return Err(CmdError::Params(format!("{name:?} can't be a file name")));
@@ -243,7 +244,7 @@ fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
         let issued = opened.and_then(|doc| {
             let mut sess = Session::new(doc);
             sess.path = Some(full.clone());
-            output::issued_copy(&sess, Some(&path.to_string_lossy()))
+            output::issued_copy_as(&sess, Some(&path.to_string_lossy()), form)
         });
         match issued {
             Ok(mut i) => {
@@ -371,6 +372,13 @@ mod tests {
         assert_eq!(footer(&sections[2]).as_deref(), Some("09 2900 GYPSUM BOARD footer"));
         assert_eq!((sections[1].page_num_start, sections[2].page_num_start), (Some(1), Some(1)));
 
+        // The outline form (M16): its own file, the first paragraph level only.
+        let r = run("spec.project.manual", json!({"path": ps, "form": "outline", "depth": 0, "format": "docx"}));
+        let file = r["files"]["docx"].as_str().unwrap().to_string();
+        assert!(file.ends_with("Riverside Library - Project Manual (Outline).docx"), "{file}");
+        let m = crate::io::open_bytes("m.docx", &std::fs::read(&file).unwrap()).unwrap();
+        assert!(!texts(&m).iter().any(|t| t.starts_with("Requirement")), "no paragraphs at depth 0");
+        assert!(texts(&m).iter().any(|t| t == "SUMMARY"));
         // Without contents, numbering running on.
         let r = run("spec.project.manual", json!({"path": ps, "contents": false, "pageNumbers": "continue", "name": "Plain", "format": "docx"}));
         let m = crate::io::open_bytes("m.docx", &std::fs::read(r["files"]["docx"].as_str().unwrap()).unwrap()).unwrap();

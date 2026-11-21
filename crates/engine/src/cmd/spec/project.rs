@@ -79,7 +79,7 @@ pub fn specs() -> Vec<CommandSpec> {
             .pure(),
         CommandSpec::new("spec.project.validate", "Check Project", LOC, validate).params(r#"{"path": string (the project's .speccraft file)}"#).pure(),
         CommandSpec::new("spec.project.publish", "Publish Project Sections", LOC, publish)
-            .params(r#"{"path": string (the project's .speccraft file), "folder"?: string (default: Published beside the project file), "force"?: bool (publish even when Check Project finds errors), "format"?: "pdf" (default), "docx" or "both"}"#)
+            .params(r#"{"path": string (the project's .speccraft file), "folder"?: string (default: Published beside the project file), "force"?: bool (publish even when Check Project finds errors), "format"?: "pdf" (default), "docx" or "both", "form"?: "full" (default), "short" or "outline", "depth"?: n}"#)
             .pure(),
         CommandSpec::new("spec.project.acknowledge", "Acknowledge Finding", LOC, acknowledge)
             .params(r#"{"path": string (the project's .speccraft file), "key": string (a warning or notice's key from spec.project.validate), "note"?: string, "undo"?: bool}"#)
@@ -1081,6 +1081,7 @@ fn publish(s: &mut Session, v: &Value) -> CmdResult {
         "both" => &["pdf", "docx"],
         other => return Err(CmdError::Params(format!("`format` must be \"pdf\", \"docx\" or \"both\", not {other:?}"))),
     };
+    let form = super::forms::Form::from_params(v)?;
     let f = load(&path)?;
     let dir = folder(&path);
     let out_dir = match p::str(v, "folder") {
@@ -1102,9 +1103,12 @@ fn publish(s: &mut Session, v: &Value) -> CmdResult {
                 sess.path = Some(full.clone());
                 for ext in formats {
                     // Word files go out under the section file's own name, in the Published folder.
-                    let out = out_dir.join(Path::new(&s.file).with_extension(ext));
+                    let stem = Path::new(&s.file).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let out = out_dir.join(format!("{stem}{}.{ext}", form.suffix()));
                     let cmd = if *ext == "pdf" { "spec.exportPdf" } else { "spec.exportDocx" };
-                    match sess.run(cmd, &json!({"path": out.to_string_lossy(), "project": path.to_string_lossy()})) {
+                    let args =
+                        json!({"path": out.to_string_lossy(), "project": path.to_string_lossy(), "form": form.name(), "depth": v.get("depth")});
+                    match sess.run(cmd, &args) {
                         Ok(x) => {
                             row[*ext] = json!(out.to_string_lossy());
                             row["pages"] = x["pages"].clone();

@@ -124,6 +124,10 @@ pub fn check(doc: &Document, values: &BTreeMap<String, String>) -> Vec<Value> {
     headings(&entries, &texts, &mut out);
     leftovers(doc, &entries, &texts, &by_block, &mut out);
     duplicates(&entries, &texts, &mut out);
+    // Short wording written against full text that has changed since (M16).
+    for (id, short) in super::forms::stale(doc).into_iter().take(MAX_EACH) {
+        out.push(finding("notice", "shortStale", Some(&id), format!("the full wording changed since its short wording was written: {short}")));
+    }
     section_end(&entries, &texts, &mut out);
     out
 }

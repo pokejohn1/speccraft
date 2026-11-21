@@ -58,6 +58,8 @@ pub(crate) enum View {
 pub(crate) struct Printed {
     rev: u64,
     width: u32,
+    /// The form shown (M16).
+    form: wordcraft_engine::cmd::spec::forms::Form,
     pub pages: Vec<(TextureHandle, egui::Vec2)>,
     pub note: Option<String>,
 }
@@ -534,8 +536,78 @@ fn details(app: &mut WordApp, ui: &mut Ui, items: &[Value], caret: Option<&str>,
             cmd = Some(("spec.removeParagraph", json!({})));
         }
     });
+    if !matches!(s(it, "kind").as_str(), "title" | "end" | "note") {
+        short_form(app, ui, &t, &id);
+    }
     if let Some((id, params)) = cmd
         && let Err(e) = app.run(id, params)
+    {
+        app.status(e);
+    }
+}
+
+/// Full, short or outline form (M16), with the outline's depth.
+pub(crate) fn form_choice(ui: &mut Ui, salt: &str, form: &mut wordcraft_engine::cmd::spec::forms::Form) {
+    use wordcraft_engine::cmd::spec::forms::Form;
+    let label = |f: Form| match f {
+        Form::Full => tl!("Full form"),
+        Form::Short => tl!("Short form"),
+        Form::Outline(_) => tl!("Outline"),
+    };
+    ui.horizontal(|ui| {
+        craft_ui::ComboBox::from_id_salt(salt).selected_text(label(*form)).show_ui(ui, |ui| {
+            let depth = if let Form::Outline(d) = *form { d } else { 1 };
+            for f in [Form::Full, Form::Short, Form::Outline(depth)] {
+                if ui.selectable_label(form.name() == f.name(), label(f)).clicked() {
+                    *form = f;
+                }
+            }
+        });
+        if let Form::Outline(d) = form {
+            ui.label(RichText::new(tl!("levels")).small());
+            ui.add(egui::DragValue::new(d).range(0..=6)).on_hover_text(tl!("Paragraph levels under each Article (0: headings only)"));
+        }
+    });
+}
+
+/// The paragraph's place in the short form (M16): in or left out, and its short wording.
+fn short_form(app: &mut WordApp, ui: &mut Ui, t: &Tokens, id: &str) {
+    let key = (app.session.document_id(), app.session.rev());
+    if app.speccraft.short_cache.as_ref().is_none_or(|(k, _)| *k != key) {
+        let v = app.session.run("spec.short.list", &json!({})).unwrap_or(Value::Null);
+        app.speccraft.short_cache = Some((key, v));
+    }
+    let list = app.speccraft.short_cache.as_ref().map(|(_, v)| v.clone()).unwrap_or(Value::Null);
+    let mark = list.get("marks").and_then(Value::as_array).and_then(|m| m.iter().find(|x| x.get("id").and_then(Value::as_str) == Some(id))).cloned();
+    let leave = mark.as_ref().and_then(|m| m.get("leave")).and_then(Value::as_bool).unwrap_or(false);
+    let text = mark.as_ref().and_then(|m| m.get("text")).and_then(Value::as_str).unwrap_or("").to_string();
+    let stale = mark.as_ref().and_then(|m| m.get("stale")).and_then(Value::as_bool).unwrap_or(false);
+    let mut cmd: Option<Value> = None;
+    ui.add_space(2.0);
+    let mut inside = !leave;
+    if ui
+        .checkbox(&mut inside, tl!("In the short form"))
+        .on_hover_text(tl!("Left out, the paragraph and what is under it are not in the short or outline form"))
+        .changed()
+    {
+        cmd = Some(json!({"id": id, "leave": !inside}));
+    }
+    if inside {
+        if app.speccraft.short_draft.as_ref().is_none_or(|(d, _)| d != id) {
+            app.speccraft.short_draft = Some((id.to_string(), text.clone()));
+        }
+        if let Some((_, draft)) = app.speccraft.short_draft.as_mut() {
+            let resp = ui.add(egui::TextEdit::singleline(draft).hint_text(tl!("Short wording (blank: the full text)")).desired_width(f32::INFINITY));
+            if resp.lost_focus() && draft.trim() != text {
+                cmd = Some(json!({"id": id, "text": draft.trim()}));
+            }
+        }
+        if stale {
+            ui.label(RichText::new(tl!("The full wording changed since this short wording was written.")).small().color(t.orange));
+        }
+    }
+    if let Some(params) = cmd
+        && let Err(e) = app.run("spec.short.set", params)
     {
         app.status(e);
     }
@@ -546,7 +618,9 @@ fn printed(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let width = (ui.available_width() - 8.0).max(80.0);
     let rev = app.session.rev();
-    let stale = app.speccraft.printed.as_ref().is_none_or(|p| p.rev != rev || p.width != width as u32);
+    form_choice(ui, "spec_printed_form", &mut app.speccraft.print_form);
+    let form = app.speccraft.print_form;
+    let stale = app.speccraft.printed.as_ref().is_none_or(|p| p.rev != rev || p.width != width as u32 || p.form != form);
     if stale {
         let p = render_printed(app, ui.ctx(), width);
         app.speccraft.printed = Some(p);
@@ -573,8 +647,9 @@ fn printed(app: &mut WordApp, ui: &mut Ui) {
 fn render_printed(app: &WordApp, ctx: &egui::Context, width: f32) -> Printed {
     use wordcraft_engine::cmd::spec::{output, project};
     let rev = app.session.rev();
-    let empty = |note: String| Printed { rev, width: width as u32, pages: Vec::new(), note: Some(note) };
-    let mut copy = match output::printable_copy(&app.session.doc) {
+    let form = app.speccraft.print_form;
+    let empty = |note: String| Printed { rev, width: width as u32, form, pages: Vec::new(), note: Some(note) };
+    let mut copy = match output::printable_copy_as(&app.session.doc, form) {
         Ok((copy, _)) => copy,
         // The engine's reason is for agents; the pane says it in the interface's language.
         Err(_) => return empty(tl!("This document has no spec paragraphs yet.").to_string()),
@@ -599,5 +674,5 @@ fn render_printed(app: &WordApp, ctx: &egui::Context, width: f32) -> Printed {
         let tex = ctx.load_texture(format!("spec_printed_{i}"), color, egui::TextureOptions::LINEAR);
         pages.push((tex, egui::vec2(width, width * pg.h / pg.w.max(1.0))));
     }
-    Printed { rev, width: width as u32, pages, note }
+    Printed { rev, width: width as u32, form, pages, note }
 }
