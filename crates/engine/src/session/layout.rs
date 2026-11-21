@@ -74,6 +74,9 @@ impl Session {
             typing_word: typing,
             filename: filename.clone(),
             filepath: filepath.clone(),
+            // Speccraft fork (W4): switched-off spec paragraphs are left out of the numbering on
+            // screen, as in the printed copy.
+            unnumbered: crate::cmd::spec::sections::unnumbered(&self.doc),
         };
         let l = Arc::new(wordcraft_layout::layout(&self.doc, &mut self.cache, &opts));
         let [newest, _] = std::mem::take(&mut self.layout);

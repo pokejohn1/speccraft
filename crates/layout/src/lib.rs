@@ -231,6 +231,16 @@ pub struct LayoutOptions {
     pub filename: Option<Arc<str>>,
     /// Document full path for FILENAME \p fields ([`FieldCtx::filepath`]).
     pub filepath: Option<Arc<str>>,
+    /// Paragraphs whose list number neither counts nor shows, by address in the document being
+    /// laid out ([`unnumbered_key`]). The Speccraft fork leaves switched-off spec paragraphs out
+    /// of the numbering on screen, so it numbers as the printed copy does.
+    pub unnumbered: Option<Arc<HashSet<usize>>>,
+}
+
+/// A paragraph's key in [`LayoutOptions::unnumbered`]: where it is in memory, valid while the
+/// document it belongs to is laid out unchanged.
+pub fn unnumbered_key(p: &Paragraph) -> usize {
+    std::ptr::from_ref(p) as usize
 }
 
 /// The word being typed ([`LayoutOptions::typing_word`]): the paragraph by its revision

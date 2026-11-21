@@ -160,6 +160,23 @@ fn stored_on(doc: &Document) -> HashSet<&str> {
     v.get(..end).unwrap_or("").split(',').map(str::trim).filter(|id| !id.is_empty()).take(MAX_ITEMS).collect()
 }
 
+/// The switched-off spec paragraphs, for layout to leave out of the list numbering on screen
+/// (W4: the editing view numbers as the printed copy does; switched-off paragraphs show no
+/// number). `None` for a document without Speccraft data, at no cost.
+pub fn unnumbered(doc: &Document) -> Option<std::sync::Arc<HashSet<usize>>> {
+    if !doc.custom_props.iter().any(|p| p.name.starts_with("Speccraft.")) {
+        return None;
+    }
+    let keys: HashSet<usize> = outline(doc)
+        .iter()
+        .filter(|e| !e.on && e.range.start.story == StoryRef::Body)
+        .filter_map(|e| e.range.start.path.0.first())
+        .filter_map(|b| doc.body.get(*b as usize).and_then(|b| b.as_para()))
+        .map(wordcraft_layout::unnumbered_key)
+        .collect();
+    (!keys.is_empty()).then(|| std::sync::Arc::new(keys))
+}
+
 /// Every section paragraph in document order, with its kind, parent and state.
 pub fn outline(doc: &Document) -> Vec<Entry> {
     let stored = stored_on(doc);
@@ -723,6 +740,50 @@ mod tests {
 
     fn styles(s: &Session) -> Vec<Option<String>> {
         s.doc.body.iter().map(|b| b.as_para().and_then(|p| p.props.style.clone())).collect()
+    }
+
+    /// W4: on screen, switched-off paragraphs neither count nor show a list number.
+    #[test]
+    fn the_screen_numbers_paragraphs_as_they_will_print() {
+        let mut s = Session::new(doc(&[
+            ("SCT", "SECTION 09 9123 - INTERIOR PAINTING"),
+            ("PRT", "GENERAL"),
+            ("ART", "SECTION INCLUDES"),
+            ("PR1", "Surface preparation."),
+            ("PR1", "Field application of paints."),
+            ("PR1", "Scope: finish interior surfaces."),
+            ("EOS", "END OF SECTION"),
+        ]));
+        for b in 3..6 {
+            run(&mut s, "caret.set", json!({"pos": {"block": b, "off": 0}}));
+            run(&mut s, "para.numbering", json!({}));
+        }
+        let labels = |s: &mut Session| -> Vec<Option<String>> {
+            let l = s.layout();
+            l.pages
+                .iter()
+                .flat_map(|p| &p.items)
+                .filter_map(|i| {
+                    if let wordcraft_layout::Placed::Lines { para, l0: 0, .. } = i {
+                        Some(para.label.as_ref().map(|lb| lb.text.clone()).filter(|t| !t.is_empty()))
+                    } else {
+                        None
+                    }
+                })
+                .skip(3)
+                .take(3)
+                .collect()
+        };
+        assert_eq!(labels(&mut s), [Some("1.".into()), Some("2.".into()), Some("3.".into())], "a plain document numbers every paragraph");
+        run(&mut s, "spec.import", json!({}));
+        run(&mut s, "spec.activate", json!({"ids": ["p0002", "p0003", "p0006"]}));
+        // Only Scope prints: it is 1., and the switched-off ones show no number.
+        assert_eq!(labels(&mut s), [None, None, Some("1.".into())]);
+        run(&mut s, "spec.activate", json!({"id": "p0005"}));
+        assert_eq!(labels(&mut s), [None, Some("1.".into()), Some("2.".into())]);
+        // The document's own numbering is unchanged.
+        let numbered = s.doc.body.iter().filter_map(|b| b.as_para()).filter(|p| p.props.numbering.is_some()).count();
+        assert_eq!(numbered, 3);
     }
 
     /// I3: a master whose levels are CSILevel0–5 styles, with "PART 1" typed into its Parts.

@@ -243,8 +243,18 @@ impl Ctx<'_> {
             .filter(|n| n.num != 0)
             .is_some_and(|n| self.doc.numbering.shows_label(n.num, n.level))
     }
+    /// A paragraph left out of the list numbering ([`crate::LayoutOptions::unnumbered`]).
+    pub(crate) fn unnumbered(&self, p: &Paragraph) -> bool {
+        self.opts.unnumbered.as_ref().is_some_and(|u| u.contains(&crate::unnumbered_key(p)))
+    }
+
     pub(crate) fn next_label(&mut self, p: &Paragraph) -> Option<(String, Level)> {
         let n = p.props.numbering.or_else(|| self.doc.styles.resolve_para(&p.props).numbering).filter(|n| n.num != 0)?;
+        if self.unnumbered(p) {
+            // Not counted and no number, but the level's indents and tab stay, so the text keeps
+            // its place in the outline.
+            return self.doc.numbering.level(n.num, n.level).map(|l| (String::new(), l.clone()));
+        }
         self.counters.next_label(&self.doc.numbering, n.num, n.level)
     }
 
