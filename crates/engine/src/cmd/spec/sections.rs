@@ -232,8 +232,16 @@ fn write_overridden(doc: &mut Document, entries: &[Entry], overridden: &HashSet<
 }
 
 /// Apply the parent rule to what the author switched on: a paragraph whose parent doesn't print
-/// is switched off too. Returns what prints afterwards.
-fn tidy(doc: &Document, entries: &[Entry], manual: &mut [bool], overridden: &HashSet<String>) -> Vec<bool> {
+/// is switched off too. With `remember`, the author's own choices switched off that way are kept
+/// there (W6: shown as chosen under an off parent, and back on when the parent is). Returns what
+/// prints afterwards.
+fn tidy(
+    doc: &Document,
+    entries: &[Entry],
+    manual: &mut [bool],
+    overridden: &HashSet<String>,
+    mut remember: Option<&mut HashSet<String>>,
+) -> Vec<bool> {
     for _ in 0..8 {
         let (on, _) = super::rules::evaluate(doc, entries, manual, overridden);
         let mut changed = false;
@@ -245,6 +253,11 @@ fn tidy(doc: &Document, entries: &[Entry], manual: &mut [bool], overridden: &Has
             {
                 *m = false;
                 changed = true;
+                if e.kind != Kind::Note
+                    && let Some(r) = remember.as_deref_mut()
+                {
+                    r.insert(e.id.clone());
+                }
             }
         }
         if !changed {
@@ -451,14 +464,15 @@ fn activate(s: &mut Session, v: &Value) -> CmdResult {
     }
     let mut refused = stored_refused(&s.doc);
     release_refused(&s.doc, &entries, &mut manual, &overridden, &mut refused);
-    let on = tidy(&s.doc, &entries, &mut manual, &overridden);
+    let on = tidy(&s.doc, &entries, &mut manual, &overridden, Some(&mut refused));
     write_state(&mut s.doc, &entries, &manual);
     write_overridden(&mut s.doc, &entries, &overridden);
     write_refused(&mut s.doc, &entries, &on, &refused);
     Ok(change_result(&entries, &on))
 }
 
-/// Switch items off, and everything under them.
+/// Switch items off, and everything under them. What the author chose under them is remembered
+/// (W6) and comes back on with them; the items themselves are forgotten.
 fn deactivate(s: &mut Session, v: &Value) -> CmdResult {
     let entries = outline(&s.doc);
     let mut manual: Vec<bool> = entries.iter().map(|e| e.manual).collect();
@@ -482,7 +496,7 @@ fn deactivate(s: &mut Session, v: &Value) -> CmdResult {
             overridden.insert(e.id.clone());
         }
     }
-    let on = tidy(&s.doc, &entries, &mut manual, &overridden);
+    let on = tidy(&s.doc, &entries, &mut manual, &overridden, Some(&mut refused));
     write_state(&mut s.doc, &entries, &manual);
     write_overridden(&mut s.doc, &entries, &overridden);
     write_refused(&mut s.doc, &entries, &on, &refused);
@@ -653,7 +667,7 @@ fn import(s: &mut Session, _v: &Value) -> CmdResult {
     let fresh: HashSet<&str> = new_ids.iter().map(String::as_str).collect();
     let mut manual: Vec<bool> =
         entries.iter().map(|e| e.manual || (fresh.contains(e.id.as_str()) && matches!(e.kind, Kind::Title | Kind::End))).collect();
-    let on = tidy(&s.doc, &entries, &mut manual, &stored_overridden(&s.doc));
+    let on = tidy(&s.doc, &entries, &mut manual, &stored_overridden(&s.doc), None);
     write_state(&mut s.doc, &entries, &manual);
     // The master's wording, recorded once at the first import (M8: origin and restore).
     super::edits::record_originals(&mut s.doc);
@@ -945,9 +959,12 @@ mod tests {
         let r = run(&mut s, "spec.deactivate", json!({"id": "p0002"}));
         assert_eq!(r["changed"], json!(["p0002", "p0003", "p0005", "p0006"]));
         assert_eq!(printable(&mut s), ["p0001", "p0010", "p0012"]);
-        // Turning the parent back on brings none of them back.
+        // W6: the author's own choices under it are remembered while it is off …
+        assert_eq!(s.doc.custom_prop(super::REFUSED_PROP), Some("p0003,p0005,p0006"));
+        // … and turning the parent back on brings them back.
         run(&mut s, "spec.activate", json!({"id": "p0002"}));
-        assert_eq!(printable(&mut s), ["p0001", "p0002", "p0010", "p0012"]);
+        assert_eq!(printable(&mut s), ["p0001", "p0002", "p0003", "p0005", "p0006", "p0010", "p0012"]);
+        assert_eq!(s.doc.custom_prop(super::REFUSED_PROP), None);
     }
 
     #[test]
@@ -976,10 +993,16 @@ mod tests {
         run(&mut s, "spec.activate", json!({"ids": ["p0002", "p0003", "p0005"]}));
         assert_eq!(st(&mut s, "p0006"), "on");
         assert_eq!(s.doc.custom_prop(super::REFUSED_PROP), None);
-        // Toggling switches off (children too) and on again.
+        // Toggling switches off (children too, remembered: W6) and on again (children with it).
         assert_eq!(run(&mut s, "spec.toggle", json!({"id": "p0005"}))["state"], "off");
-        assert_eq!(st(&mut s, "p0006"), "off");
+        assert_eq!(st(&mut s, "p0006"), "refused");
         assert_eq!(run(&mut s, "spec.toggle", json!({"id": "p0005"}))["state"], "on");
+        assert_eq!(st(&mut s, "p0006"), "on");
+        // Switching off a remembered child itself forgets it.
+        run(&mut s, "spec.deactivate", json!({"id": "p0005"}));
+        assert_eq!(run(&mut s, "spec.toggle", json!({"id": "p0006"}))["state"], "off");
+        run(&mut s, "spec.activate", json!({"id": "p0005"}));
+        assert_eq!(st(&mut s, "p0006"), "off");
         // Toggling a refused paragraph clears it; notes can't be toggled.
         run(&mut s, "spec.deactivate", json!({"id": "p0003"}));
         run(&mut s, "spec.toggle", json!({"id": "p0007"}));
