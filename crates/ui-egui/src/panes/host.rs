@@ -158,6 +158,7 @@ fn close(app: &mut WordApp, pane: Pane) {
         None if pane == Pane::Sections => app.speccraft.pane_open = false,
         None if pane == Pane::SpecOutline => app.speccraft.outline_open = false,
         None if pane == Pane::SpecLibrary => app.speccraft.library.open = false,
+        None if pane == Pane::SpecOverview => app.speccraft.overview.open = false,
         None => app.restrict.open = false,
     }
 }

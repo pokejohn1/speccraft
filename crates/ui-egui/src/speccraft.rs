@@ -21,6 +21,7 @@ pub(crate) mod checks;
 pub(crate) mod library;
 pub(crate) mod marks;
 pub(crate) mod outline;
+pub(crate) mod overview;
 pub(crate) mod rules_view;
 pub(crate) mod tabs;
 pub(crate) mod updates;
@@ -73,6 +74,8 @@ pub struct SpecUi {
     pub(crate) publish_format: String,
     /// Open section tabs, the one used last at the end (M15).
     pub(crate) tab_order: Vec<u64>,
+    /// The Project Overview pane (M12).
+    pub overview: overview::OverviewUi,
     /// The Updates view (M11).
     pub(crate) update: updates::UpdateUi,
     /// The Master Library pane (M9).
@@ -106,6 +109,9 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
     let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
     if id.starts_with("ui.spec.library") {
         return library::command(app, id, p);
+    }
+    if id == "ui.spec.overview" {
+        return overview::command(app, p);
     }
     if id.starts_with("ui.spec.update") {
         return updates::command(app, id, p);
@@ -410,6 +416,8 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
             big(ui, app, "checkErrors", "Check\nProject", "ui.spec.check", json!({}), false);
             big(ui, app, "export", "Publish\nProject", "ui.spec.publish", json!({}), false);
             big(ui, app, "coverPage", "Project\nManual", "ui.spec.manual", json!({}), false);
+            let shown = app.speccraft.overview.open;
+            big(ui, app, "tableOfFigures", "Project\nOverview", "ui.spec.overview", json!({"value": !shown}), shown);
         });
     });
     group(ui, "Section", None, app, |ui, app| {

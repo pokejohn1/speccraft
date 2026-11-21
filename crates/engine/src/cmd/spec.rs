@@ -19,6 +19,7 @@ pub mod fields;
 pub mod library;
 pub mod manual;
 pub mod output;
+pub mod overview;
 pub mod project;
 pub mod quality;
 pub mod rules;
@@ -49,6 +50,7 @@ pub fn specs() -> Vec<CommandSpec> {
     v.extend(library::specs());
     v.extend(manual::specs());
     v.extend(output::specs());
+    v.extend(overview::specs());
     v.extend(project::specs());
     v.extend(quality::specs());
     v.extend(rules::specs());
