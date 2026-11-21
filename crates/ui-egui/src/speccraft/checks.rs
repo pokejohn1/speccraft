@@ -161,7 +161,11 @@ pub(crate) fn project_report(app: &mut WordApp, ui: &mut Ui, f: &Value, action: 
                 if row(ui, &t, x, accepted)
                     && let Some(file) = &file
                 {
-                    *action = Some(("ui.spec.goTo", json!({"file": file, "para": x.get("para")})));
+                    let mut args = json!({"file": file, "para": x.get("para")});
+                    if x.get("code").and_then(Value::as_str) == Some("masterChanged") {
+                        args["view"] = json!("updates");
+                    }
+                    *action = Some(("ui.spec.goTo", args));
                 }
                 if accepted && let Some(note) = x.get("note").and_then(Value::as_str).filter(|n| !n.is_empty()) {
                     ui.label(RichText::new(note).small().italics().color(t.text_dim));

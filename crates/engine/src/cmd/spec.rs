@@ -22,6 +22,7 @@ pub mod project;
 pub mod quality;
 pub mod rules;
 pub mod sections;
+pub mod update;
 
 const LOC: &str = "Specs › Items";
 /// The start of the tag of every spec item's content control.
@@ -49,6 +50,7 @@ pub fn specs() -> Vec<CommandSpec> {
     v.extend(project::specs());
     v.extend(quality::specs());
     v.extend(rules::specs());
+    v.extend(update::specs());
     v
 }
 

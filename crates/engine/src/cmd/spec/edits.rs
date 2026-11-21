@@ -99,6 +99,10 @@ fn from_master(doc: &Document) -> Option<BTreeMap<String, Original>> {
     let path = m.get("path")?.as_str()?.to_string();
     let bytes = crate::io::read_document(FsPath::new(&path)).ok()?;
     let fp = super::project::fingerprint(&bytes);
+    // A master changed since the copy was made no longer has the copy's original wording (M11).
+    if m.get("fingerprint").and_then(Value::as_str).is_some_and(|f| f != fp) {
+        return None;
+    }
     if let Ok(cache) = MASTER_CACHE.lock()
         && let Some((p, f, map)) = cache.as_ref()
         && *p == path
@@ -169,7 +173,7 @@ pub fn record_originals(doc: &mut Document) {
 }
 
 /// The fingerprints of `Speccraft.Baseline`, by id.
-fn baseline(doc: &Document) -> HashMap<String, String> {
+pub(crate) fn baseline(doc: &Document) -> HashMap<String, String> {
     doc.custom_prop(super::project::BASELINE_PROP)
         .unwrap_or("")
         .split(',')
@@ -246,7 +250,7 @@ fn origin_cmd(s: &mut Session, _v: &Value) -> CmdResult {
 }
 
 /// Replace a spec paragraph's content (between its markers) with `text`, in the formatting of its first character.
-fn set_paragraph_text(doc: &mut Document, e: &Entry, text: &str) -> Result<(), CmdError> {
+pub(crate) fn set_paragraph_text(doc: &mut Document, e: &Entry, text: &str) -> Result<(), CmdError> {
     let a = e.range.content_start();
     let props = doc.para_at(&a).map(|p| p.props_of_char(a.off).clone()).unwrap_or_default();
     if e.range.end.off > a.off {
@@ -257,7 +261,7 @@ fn set_paragraph_text(doc: &mut Document, e: &Entry, text: &str) -> Result<(), C
 }
 
 /// Insert a new paragraph at body index `at` and make it spec paragraph `id`.
-fn insert_item(s: &mut Session, at: usize, style: &str, text: &str, id: &str, props: wordcraft_doc::CharProps) -> Result<(), CmdError> {
+pub(crate) fn insert_item(s: &mut Session, at: usize, style: &str, text: &str, id: &str, props: wordcraft_doc::CharProps) -> Result<(), CmdError> {
     let mut para = Paragraph::with_text(text, props);
     if !style.is_empty() {
         para = para.styled(style);
@@ -306,9 +310,10 @@ fn restore_cmd(s: &mut Session, v: &Value) -> CmdResult {
     {
         let o = orig.get(id).cloned().ok_or_else(|| CmdError::Failed(format!("no spec paragraph or deleted master paragraph called {id:?}")))?;
         let entries = sections::outline(&s.doc);
-        let order: Vec<&String> = orig.keys().collect();
+        // In the master's order (M11), which new master paragraphs' ids don't follow.
+        let order: Vec<String> = super::update::master_order(&s.doc).into_iter().map(|(id, _)| id).collect();
         let pos = order.iter().position(|k| k.as_str() == id).unwrap_or(0);
-        let before = order.get(..pos).unwrap_or(&[]).iter().rev().find_map(|k| entries.iter().find(|e| &e.id == *k));
+        let before = order.get(..pos).unwrap_or(&[]).iter().rev().find_map(|k| entries.iter().find(|e| &e.id == k));
         let at = before
             .and_then(|e| e.range.start.path.0.first())
             .map_or_else(|| entries.first().and_then(|e| e.range.start.path.0.first()).map_or(0, |b| *b as usize), |b| *b as usize + 1);

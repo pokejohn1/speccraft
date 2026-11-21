@@ -652,6 +652,9 @@ fn copy_master(master: &Path, target: &Path, taken: &[SectionRef]) -> Result<(Do
     s.doc.set_custom_prop(ROLE_PROP, "project");
     s.doc.set_custom_prop(MASTER_PROP, &json!({"path": m.path, "version": m.version, "fingerprint": m.fingerprint}).to_string());
     s.doc.set_custom_prop(BASELINE_PROP, &baseline.join(","));
+    // The master's order, for comparing with a newer master (M11).
+    let order: Vec<String> = sections::outline(&s.doc).into_iter().map(|e| e.id).collect();
+    s.doc.set_custom_prop(super::update::ORDER_PROP, &order.join(","));
     crate::io::save_path(target, &s.doc).map_err(CmdError::Failed)?;
     Ok((s.doc, m))
 }
@@ -998,12 +1001,18 @@ fn validate(_: &mut Session, v: &Value) -> CmdResult {
             x["para"] = json!(entries.iter().find(|e| entry_text(&doc, e).to_lowercase().contains(&needle)).map(|e| e.id.clone()));
             out.push(x);
         }
-        // A newer master.
-        if let Some(m) = &s.master
+        // A newer master. The copy's own record is the current one (a master update rewrites it).
+        let own = doc.custom_prop(MASTER_PROP).and_then(|m| serde_json::from_str::<MasterRef>(m).ok());
+        if let Some(m) = own.as_ref().or(s.master.as_ref())
             && let Ok(bytes) = crate::io::read_document(Path::new(&m.path))
             && fingerprint(&bytes) != m.fingerprint
         {
-            out.push(finding("notice", "masterChanged", file, format!("the master {} has changed since this copy was made", m.path)));
+            out.push(finding(
+                "notice",
+                "masterChanged",
+                file,
+                format!("the master {} has changed since this copy was made: Master Updates shows what changed", m.path),
+            ));
         }
     }
     check_project_rules(&f, &values, &have, &printing_by_number, &mut out);

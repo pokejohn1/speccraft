@@ -22,6 +22,7 @@ pub(crate) mod library;
 pub(crate) mod marks;
 pub(crate) mod outline;
 pub(crate) mod rules_view;
+pub(crate) mod updates;
 
 /// What the Specs tab and Sections pane keep between frames.
 #[derive(Default)]
@@ -66,6 +67,8 @@ pub struct SpecUi {
     pub(crate) show_accepted: bool,
     /// The last Publish stopped at errors (the report offers Publish Anyway).
     pub(crate) publish_blocked: bool,
+    /// The Updates view (M11).
+    pub(crate) update: updates::UpdateUi,
     /// The Master Library pane (M9).
     pub library: library::LibraryUi,
 }
@@ -98,6 +101,9 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
     if id.starts_with("ui.spec.library") {
         return library::command(app, id, p);
     }
+    if id.starts_with("ui.spec.update") {
+        return updates::command(app, id, p);
+    }
     match id {
         "ui.spec.sectionsPane" => {
             app.speccraft.pane_open = p.get("value").and_then(Value::as_bool).unwrap_or(!app.speccraft.pane_open);
@@ -111,6 +117,7 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
                     "fields" => outline::View::Fields,
                     "rules" => outline::View::Rules,
                     "checks" => outline::View::Checks,
+                    "updates" => outline::View::Updates,
                     _ => outline::View::Outline,
                 };
             }
@@ -151,6 +158,9 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
             }
             if let Some(para) = s("para") {
                 checks::go_to_para(app, &para)?;
+            }
+            if let Some(view) = s("view") {
+                app.run("ui.spec.outlinePane", json!({"value": true, "view": view}))?;
             }
             Ok(json!({"file": file}))
         }
@@ -371,6 +381,7 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
         big(ui, app, "ccComboBox", "Fill-ins", "ui.spec.outlinePane", json!({"value": true, "view": "fields"}), false);
         big(ui, app, "link", "Rules", "ui.spec.outlinePane", json!({"value": true, "view": "rules"}), false);
         big(ui, app, "checkErrors", "Check\nSection", "ui.spec.outlinePane", json!({"value": true, "view": "checks"}), false);
+        big(ui, app, "compare", "Master\nUpdates", "ui.spec.outlinePane", json!({"value": true, "view": "updates"}), false);
         big(ui, app, "readMode", "Printed\nView", "ui.spec.outlinePane", json!({"value": true, "view": "printed"}), false);
         big(ui, app, "export", "Export\nPDF", "spec.exportPdf", json!({}), false);
     });
