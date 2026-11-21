@@ -174,7 +174,12 @@ pub(crate) fn strip(app: &mut WordApp, ui: &mut Ui) {
     if app.speccraft.project.is_none() {
         return;
     }
-    let docs = app.session.documents();
+    // Only section tabs: a document opened the usual way has a window of its own.
+    let tabs = &app.speccraft.tab_order;
+    let docs: Vec<_> = app.session.documents().into_iter().filter(|d| tabs.contains(&d.id)).collect();
+    if docs.is_empty() {
+        return;
+    }
     let t = Tokens::get(ui.ctx());
     let newer = newer_masters(app);
     let mut action: Option<(&'static str, Value)> = None;
@@ -291,6 +296,11 @@ mod tests {
         a.run("ui.spec.tab", json!({"id": gypsum})).unwrap();
         assert_eq!(a.session.document_id(), gypsum);
         assert!(a.session.dirty);
+        // Switching tabs opens no windows: the sections waiting in tabs belong to this one.
+        a.run("ui.spec.tab", json!({"id": sealants})).unwrap();
+        a.run("ui.spec.tab", json!({"id": gypsum})).unwrap();
+        a.sync_document();
+        assert_eq!(a.windows.count(), 1, "one window, with tabs");
         // Opening a section that is open shows its tab.
         a.run("ui.spec.openSection", json!({"file": "079200.docx"})).unwrap();
         assert_eq!((a.session.document_id(), a.session.documents().len()), (sealants, 2));

@@ -152,6 +152,12 @@ impl Windows {
     }
 
     /// The window showing document `doc`, the most recently focused if several do.
+    /// How many windows are open (tests).
+    #[cfg(test)]
+    pub(crate) fn count(&self) -> usize {
+        self.open.len()
+    }
+
     fn of_doc(&self, doc: u64) -> Option<u64> {
         self.recent_keys().into_iter().find(|&k| self.get(k).is_some_and(|w| w.doc == doc))
     }
@@ -482,7 +488,13 @@ impl WordApp {
         let mut changed = self.windows.open.len() != before;
         let active = self.session.document_id();
         for d in self.session.documents() {
-            if d.id == active || Some(d.id) == self.no_document || d.id == self.shown_document || self.windows.of_doc(d.id).is_some() {
+            // Speccraft fork: sections waiting in tabs (M15) belong to the window with the tabs.
+            if d.id == active
+                || Some(d.id) == self.no_document
+                || d.id == self.shown_document
+                || self.windows.of_doc(d.id).is_some()
+                || self.speccraft.tab_order.contains(&d.id)
+            {
                 continue;
             }
             let key = self.windows.next_key;
