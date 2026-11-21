@@ -22,6 +22,7 @@ pub(crate) mod library;
 pub(crate) mod marks;
 pub(crate) mod outline;
 pub(crate) mod overview;
+pub(crate) mod project_rules;
 pub(crate) mod rules_view;
 pub(crate) mod tabs;
 pub(crate) mod updates;
@@ -74,6 +75,8 @@ pub struct SpecUi {
     pub(crate) publish_format: String,
     /// Open section tabs, the one used last at the end (M15).
     pub(crate) tab_order: Vec<u64>,
+    /// The add form for rules between sections (W3).
+    pub(crate) project_rule_form: project_rules::ProjectRuleForm,
     /// The Project Overview pane (M12).
     pub overview: overview::OverviewUi,
     /// The Updates view (M11).
@@ -109,6 +112,9 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
     let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
     if id.starts_with("ui.spec.library") {
         return library::command(app, id, p);
+    }
+    if id == "ui.spec.addProjectRule" || id == "ui.spec.removeProjectRule" {
+        return project_rules::command(app, id, p);
     }
     if id == "ui.spec.overview" {
         return overview::command(app, p);
@@ -515,6 +521,7 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
         ui.label(RichText::new(sub.join(" · ")).small().color(t.text_dim));
     }
     project_info(app, ui, &info);
+    project_rules::show(app, ui, &info);
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         if ui.small_button(tl!("Add Section…")).clicked() {
