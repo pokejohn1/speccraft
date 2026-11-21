@@ -725,6 +725,40 @@ mod tests {
         s.doc.body.iter().map(|b| b.as_para().and_then(|p| p.props.style.clone())).collect()
     }
 
+    /// I3: a master whose levels are CSILevel0–5 styles, with "PART 1" typed into its Parts.
+    #[test]
+    fn level_numbered_styles_nest_and_a_child_of_a_switched_off_heading_does_not_print() {
+        let mut s = Session::new(doc(&[
+            ("CSILevel0", "Section 099123 Interior Painting"),
+            ("CSILevel1", "PART 1  GENERAL"),
+            ("CSILevel2", "SECTION INCLUDES"),
+            ("CSILevel3", "Surface preparation."),
+            ("CSILevel3", "Scope: Finish interior surfaces exposed to view."),
+            ("CSILevel4", "Prime surfaces to receive wall coverings."),
+            ("CSILevel2", "RELATED REQUIREMENTS"),
+            ("CSILevel3", "Section 099113 - Exterior Painting."),
+            ("CSILevel0", "END OF SECTION  099123"),
+        ]));
+        run(&mut s, "spec.import", json!({}));
+        let o = run(&mut s, "spec.outline", json!({}));
+        let parent = |id: &str| o["items"].as_array().unwrap().iter().find(|i| i["id"] == id).unwrap()["parent"].clone();
+        assert_eq!((parent("p0003"), parent("p0005"), parent("p0006")), (json!("p0002"), json!("p0003"), json!("p0005")));
+        assert_eq!(o["items"][8]["kind"], "end");
+        run(&mut s, "spec.activate", json!({"ids": ["p0002", "p0003", "p0005", "p0006"]}));
+        assert_eq!(printable(&mut s), ["p0001", "p0002", "p0003", "p0005", "p0006", "p0009"]);
+        // 1.01 off: Scope and its child stop printing too.
+        run(&mut s, "spec.toggle", json!({"id": "p0003"}));
+        assert_eq!(printable(&mut s), ["p0001", "p0002", "p0009"]);
+        // And Scope can't be switched on under it.
+        assert!(s.run("spec.activate", &json!({"id": "p0005"})).is_err());
+        // A paragraph added under an Article takes the next level's style.
+        run(&mut s, "spec.toggle", json!({"id": "p0003"}));
+        let r = run(&mut s, "spec.addParagraph", json!({"after": "p0003", "child": true, "text": "Touch-up."}));
+        let id = r["id"].as_str().unwrap().to_string();
+        let block = s.doc.body.iter().filter_map(|b| b.as_para()).find(|p| p.plain_text().contains("Touch-up.")).unwrap();
+        assert_eq!(block.props.style.as_deref(), Some("CSILevel3"), "{id}");
+    }
+
     #[test]
     fn styles_give_kinds_and_levels() {
         assert_eq!(classify(Some("SCT"), "x"), (Kind::Title, Some(0)));
