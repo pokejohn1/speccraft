@@ -155,6 +155,35 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
             app.speccraft.hide_marks = !show;
             Ok(json!({"shown": show}))
         }
+        "ui.spec.why" => {
+            let mut args = json!({});
+            if let Some(id) = s("id") {
+                args["id"] = json!(id);
+            }
+            let r = app.run("spec.why", args)?;
+            let reasons: Vec<&str> = r["reasons"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            app.status(reasons.join(" "));
+            Ok(r)
+        }
+        "ui.spec.deleteAdded" => {
+            // With several paragraphs selected, every added one in the selection (M18).
+            let sel = &app.session.sel;
+            let body = wordcraft_doc::StoryRef::Body;
+            let spans = sel.anchor.story == body && sel.focus.story == body && sel.anchor.path.0.first() != sel.focus.path.0.first();
+            let args = match s("id") {
+                Some(id) if !spans => json!({"id": id}),
+                _ => json!({}),
+            };
+            let r = app.run("spec.removeParagraph", args)?;
+            let n = r["ids"].as_array().map_or(0, Vec::len);
+            if r["kept"].as_u64().unwrap_or(0) > 0 {
+                app.status(crate::i18n::fmt(
+                    tl!("Deleted {n} added paragraphs; master paragraphs in the selection were kept (switch them off instead)"),
+                    &[("n", &n.to_string())],
+                ));
+            }
+            Ok(r)
+        }
         "ui.spec.openProject" => match s("path") {
             Some(path) => open_project(app, PathBuf::from(path)),
             None => ask(app, Pick::OpenProject),

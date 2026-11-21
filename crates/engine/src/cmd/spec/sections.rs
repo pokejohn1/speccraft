@@ -50,6 +50,8 @@ pub fn specs() -> Vec<CommandSpec> {
             .key("Mod+Alt+J")
             .params(r#"{"id"?: string (default: the paragraph at the caret)}"#),
         CommandSpec::new("spec.outline", "Spec Outline", LOC, outline_cmd).pure(),
+        CommandSpec::new("spec.exclude", "Leave Out and Ignore Rules", LOC, exclude)
+            .params(r#"{"id"?: string (default: the paragraph at the caret), "exclude"?: bool (default: the opposite of now)}"#),
     ]
 }
 
@@ -538,6 +540,45 @@ fn toggle(s: &mut Session, v: &Value) -> CmdResult {
     Ok(json!({"id": id, "state": "refused", "parent": parent, "changed": []}))
 }
 
+/// Leave a paragraph out whatever the rules say (M17, SpecLink's "exclude and ignore links"): it
+/// is switched off, with what is under it, and no rule turns it on until it is included again.
+/// `exclude: false` lifts that; the paragraph stays off until switched on.
+fn exclude(s: &mut Session, v: &Value) -> CmdResult {
+    let entries = outline(&s.doc);
+    let i = match v.get("id") {
+        Some(_) => targets(v, &entries)?.first().copied().ok_or_else(|| CmdError::Params("`id` is required".into()))?,
+        None => at_caret(s, &entries).ok_or_else(|| CmdError::Failed("the caret is not in a section paragraph (run spec.import first?)".into()))?,
+    };
+    let Some(e) = entries.get(i) else { return Err(CmdError::Failed("no such paragraph".into())) };
+    if e.kind == Kind::Note {
+        return Err(CmdError::Failed(format!("{:?} is an author note: notes never print", e.id)));
+    }
+    let mut overridden = stored_overridden(&s.doc);
+    let now = overridden.contains(&e.id);
+    let want = match v.get("exclude") {
+        None | Some(Value::Null) => !now,
+        Some(x) => x.as_bool().ok_or_else(|| CmdError::Params("`exclude` must be true or false".into()))?,
+    };
+    let id = e.id.clone();
+    let mut manual: Vec<bool> = entries.iter().map(|e| e.manual).collect();
+    let mut refused = stored_refused(&s.doc);
+    if want {
+        overridden.insert(id.clone());
+        refused.remove(&id);
+        if let Some(m) = manual.get_mut(i) {
+            *m = false;
+        }
+    } else {
+        overridden.remove(&id);
+    }
+    let on = tidy(&s.doc, &entries, &mut manual, &overridden, Some(&mut refused));
+    write_state(&mut s.doc, &entries, &manual);
+    write_overridden(&mut s.doc, &entries, &overridden);
+    write_refused(&mut s.doc, &entries, &on, &refused);
+    let changed = change_result(&entries, &on);
+    Ok(json!({"id": id, "excluded": want, "changed": changed["changed"]}))
+}
+
 /// Every section paragraph with its state, for the Spec Outline pane and the page's marks.
 fn outline_cmd(s: &mut Session, _v: &Value) -> CmdResult {
     let st = states(&s.doc);
@@ -546,7 +587,8 @@ fn outline_cmd(s: &mut Session, _v: &Value) -> CmdResult {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     let items: Vec<Value> = st
         .iter()
-        .map(|(e, state)| {
+        .enumerate()
+        .map(|(seq, (e, state))| {
             *counts.entry(state.name()).or_default() += 1;
             let text: String = s.doc.control_text(&e.range).replace(OBJ, "").chars().take(OUTLINE_TEXT).collect();
             json!({
@@ -555,6 +597,7 @@ fn outline_cmd(s: &mut Session, _v: &Value) -> CmdResult {
                 "level": e.level,
                 "parent": e.parent.and_then(|p| entries.get(p)).map(|p| p.id.clone()),
                 "state": state.name(),
+                "seq": seq,
                 "block": e.range.start.path.0.first(),
                 "text": text,
             })
@@ -1015,6 +1058,30 @@ mod tests {
         assert_eq!(st(&mut s, "p0003"), "on");
         run(&mut s, "edit.undo", json!({}));
         assert_eq!(st(&mut s, "p0003"), "off");
+    }
+
+    #[test]
+    fn excluding_leaves_a_paragraph_out_whatever_the_rules_say() {
+        let mut s = imported();
+        run(&mut s, "spec.activate", json!({"ids": ["p0002", "p0003", "p0005", "p0006"]}));
+        // A rule would turn p0007 on with p0005.
+        run(&mut s, "spec.rules.add", json!({"kind": "require", "target": "p0007", "if": [{"on": "p0005"}]}));
+        assert!(printable(&mut s).contains(&"p0007".to_string()));
+        let r = run(&mut s, "spec.exclude", json!({"id": "p0007"}));
+        assert_eq!(r["excluded"], true);
+        assert!(!printable(&mut s).contains(&"p0007".to_string()));
+        // Excluding a paragraph no rule has reached yet keeps rules off it too.
+        let r = run(&mut s, "spec.exclude", json!({"id": "p0005"}));
+        assert_eq!(r["changed"], json!(["p0005", "p0006"]));
+        assert_eq!(s.doc.custom_prop(super::REFUSED_PROP), Some("p0006"));
+        run(&mut s, "spec.exclude", json!({"id": "p0005", "exclude": false}));
+        assert!(!printable(&mut s).contains(&"p0005".to_string()), "included again, but off until switched on");
+        run(&mut s, "spec.activate", json!({"id": "p0005"}));
+        assert!(printable(&mut s).contains(&"p0006".to_string()));
+        assert!(s.run("spec.exclude", &json!({"id": "p0004"})).is_err(), "notes can't be excluded");
+        let o = run(&mut s, "spec.outline", json!({}));
+        assert_eq!(o["items"][0]["seq"], 0);
+        assert_eq!(o["items"][3]["seq"], 3);
     }
 
     #[test]

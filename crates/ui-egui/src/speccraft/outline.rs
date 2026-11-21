@@ -183,6 +183,9 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
             let kind = s("kind");
             let here = caret.as_deref() == Some(s("id"));
             ui.horizontal(|ui| {
+                // The sequence number, as in the page's column (M17).
+                let seq = it.get("seq").and_then(Value::as_u64).unwrap_or(0) as usize;
+                ui.label(RichText::new(super::marks::seq_label(seq)).monospace().small().color(t.text_dim));
                 ui.add_space(level.min(7.0) * 10.0);
                 let st = state_of(state);
                 if st == State::Note {

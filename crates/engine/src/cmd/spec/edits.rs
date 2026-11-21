@@ -48,8 +48,8 @@ pub fn specs() -> Vec<CommandSpec> {
             .params(r#"{"id"?: string (default: the paragraph at the caret)}"#),
         CommandSpec::new("spec.addParagraph", "Add Paragraph", LOC, add_cmd)
             .params(r#"{"after"?: string (default: the paragraph at the caret), "text"?: string, "child"?: bool (one level down)}"#),
-        CommandSpec::new("spec.removeParagraph", "Remove Added Paragraph", LOC, remove_cmd)
-            .params(r#"{"id"?: string (default: the paragraph at the caret)}"#),
+        CommandSpec::new("spec.removeParagraph", "Delete Added Paragraph(s)", LOC, remove_cmd)
+            .params(r#"{"id"?: string, "ids"?: [string] (default: the added paragraphs the selection touches, or the paragraph at the caret)}"#),
     ]
 }
 
@@ -402,28 +402,85 @@ fn add_cmd(s: &mut Session, v: &Value) -> CmdResult {
     Ok(json!({"id": id, "style": style, "on": on}))
 }
 
+/// Delete added paragraphs (M18): `id`, `ids`, or with neither the paragraph at the caret, or
+/// every added paragraph the selection touches when it spans several (master paragraphs in it
+/// are kept: they are switched off, never deleted). A paragraph goes only with everything under it.
 fn remove_cmd(s: &mut Session, v: &Value) -> CmdResult {
-    let (i, entries) = target(s, v, "id")?;
-    let Some(e) = entries.get(i) else { return Err(CmdError::Failed("no such paragraph".into())) };
+    let entries = sections::outline(&s.doc);
     let (items, _) = origins(&s.doc);
-    if items.get(i).map(|(_, o)| *o) != Some(Origin::Added) {
-        return Err(CmdError::Failed(format!("{:?} is a master paragraph: switch it off instead (master paragraphs are never deleted)", e.id)));
+    let added = |i: usize| items.get(i).map(|(_, o)| *o) == Some(Origin::Added);
+    let by_id = |id: &str| entries.iter().position(|e| e.id == id.trim()).ok_or_else(|| CmdError::Failed(format!("no spec paragraph called {id:?}")));
+    let mut chosen: Vec<usize> = Vec::new();
+    let mut kept = 0usize;
+    let explicit = if let Some(list) = v.get("ids") {
+        let list = list.as_array().ok_or_else(|| CmdError::Params("`ids` must be a list of strings".into()))?;
+        if list.len() > super::MAX_ITEMS {
+            return Err(CmdError::Params(format!("at most {} ids at once", super::MAX_ITEMS)));
+        }
+        for x in list {
+            chosen.push(by_id(x.as_str().ok_or_else(|| CmdError::Params("`ids` must be a list of strings".into()))?)?);
+        }
+        true
+    } else if let Some(id) = p::str(v, "id") {
+        chosen.push(by_id(id)?);
+        true
+    } else {
+        let (a, b) = (s.sel.anchor.clone(), s.sel.focus.clone());
+        let spans = a.story == StoryRef::Body && b.story == StoryRef::Body && a.path.0.first() != b.path.0.first();
+        if spans {
+            let (x, y) = (a.path.0.first().copied().unwrap_or(0), b.path.0.first().copied().unwrap_or(0));
+            let (lo, hi) = (x.min(y), x.max(y));
+            for (i, e) in entries.iter().enumerate() {
+                if e.range.start.path.0.first().is_some_and(|blk| (lo..=hi).contains(blk)) {
+                    if added(i) {
+                        chosen.push(i);
+                    } else {
+                        kept += 1;
+                    }
+                }
+            }
+            if chosen.is_empty() {
+                return Err(CmdError::Failed("the selection has no added paragraphs: master paragraphs are switched off, never deleted".into()));
+            }
+            false
+        } else {
+            chosen.push(sections::at_caret(s, &entries).ok_or_else(|| CmdError::Failed("the caret is not in a spec paragraph".into()))?);
+            true
+        }
+    };
+    chosen.sort_unstable();
+    chosen.dedup();
+    let set: std::collections::HashSet<usize> = chosen.iter().copied().collect();
+    let mut blocks: Vec<usize> = Vec::new();
+    for &i in &chosen {
+        let Some(e) = entries.get(i) else { return Err(CmdError::Failed("no such paragraph".into())) };
+        if explicit && !added(i) {
+            return Err(CmdError::Failed(format!("{:?} is a master paragraph: switch it off instead (master paragraphs are never deleted)", e.id)));
+        }
+        if entries.iter().enumerate().any(|(j, x)| x.parent == Some(i) && !set.contains(&j)) {
+            return Err(CmdError::Failed(format!("{:?} has paragraphs under it: delete them too, or first", e.id)));
+        }
+        let b = e.range.start.path.0.first().map_or(usize::MAX, |b| *b as usize);
+        if b >= s.doc.body.len() {
+            return Err(CmdError::Failed("no paragraph".into()));
+        }
+        if s.doc.body.get(b).and_then(|x| x.as_para()).is_some_and(|p| p.section.is_some()) {
+            return Err(CmdError::Failed("this paragraph ends a page layout section: it can't be removed".into()));
+        }
+        blocks.push(b);
     }
-    if entries.iter().any(|x| x.parent == Some(i)) {
-        return Err(CmdError::Failed("remove the paragraphs under it first".into()));
+    blocks.sort_unstable();
+    blocks.dedup();
+    for b in blocks.iter().rev() {
+        s.doc.body.remove(*b);
     }
-    let b = e.range.start.path.0.first().map_or(usize::MAX, |b| *b as usize);
-    if s.doc.body.get(b).and_then(|x| x.as_para()).is_some_and(|p| p.section.is_some()) {
-        return Err(CmdError::Failed("this paragraph ends a page layout section: it can't be removed".into()));
-    }
-    if b >= s.doc.body.len() {
-        return Err(CmdError::Failed("no paragraph".into()));
-    }
-    s.doc.body.remove(b);
     s.doc.ensure_nonempty();
-    let back = b.saturating_sub(1).min(s.doc.body.len().saturating_sub(1));
+    let first = blocks.first().copied().unwrap_or(0);
+    let back = first.saturating_sub(1).min(s.doc.body.len().saturating_sub(1));
     s.sel = Selection::caret(Pos::new(StoryRef::Body, Path::top(back), 0));
-    Ok(json!({"removed": e.id}))
+    let ids: Vec<&str> = chosen.iter().filter_map(|i| entries.get(*i)).map(|e| e.id.as_str()).collect();
+    let removed = if ids.len() == 1 { json!(ids.first()) } else { json!(null) };
+    Ok(json!({"removed": removed, "ids": ids, "kept": kept}))
 }
 
 #[cfg(test)]
@@ -525,6 +582,36 @@ mod tests {
         run(&mut s, "spec.removeParagraph", json!({"id": "u0002"}));
         run(&mut s, "spec.removeParagraph", json!({"id": "u0001"}));
         assert_eq!(run(&mut s, "spec.origin", json!({}))["counts"], json!({"added": 1, "master": 6}));
+    }
+
+    #[test]
+    fn several_added_paragraphs_are_deleted_from_a_selection_and_master_ones_kept() {
+        let mut s = section();
+        run(&mut s, "spec.activate", json!({"ids": ["p0002", "p0003", "p0004"]}));
+        run(&mut s, "spec.addParagraph", json!({"after": "p0004", "text": "One."}));
+        run(&mut s, "spec.addParagraph", json!({"after": "u0001", "text": "Two."}));
+        run(&mut s, "spec.addParagraph", json!({"after": "u0002", "text": "Under two.", "child": true}));
+        // p0004 (block 3) through u0003: one master paragraph and three added ones.
+        let blocks: Vec<u32> = sections::outline(&s.doc)
+            .iter()
+            .filter(|e| ["p0004", "u0003"].contains(&e.id.as_str()))
+            .filter_map(|e| e.range.start.path.0.first().copied())
+            .collect();
+        s.sel = Selection {
+            anchor: Pos::new(StoryRef::Body, Path::top(blocks[0] as usize), 1),
+            focus: Pos::new(StoryRef::Body, Path::top(blocks[1] as usize), 2),
+        };
+        let r = run(&mut s, "spec.removeParagraph", json!({}));
+        assert_eq!((r["ids"].clone(), r["kept"].clone()), (json!(["u0001", "u0002", "u0003"]), json!(1)));
+        assert_eq!(run(&mut s, "spec.origin", json!({}))["counts"], json!({"master": 6}));
+        // A parent goes only with what is under it.
+        run(&mut s, "spec.addParagraph", json!({"after": "p0004", "text": "A."}));
+        run(&mut s, "spec.addParagraph", json!({"after": "u0001", "text": "B.", "child": true}));
+        assert!(s.run("spec.removeParagraph", &json!({"ids": ["u0001"]})).is_err());
+        run(&mut s, "spec.removeParagraph", json!({"ids": ["u0001", "u0002"]}));
+        // A selection of master paragraphs only deletes nothing.
+        s.sel = Selection { anchor: Pos::new(StoryRef::Body, Path::top(1), 0), focus: Pos::new(StoryRef::Body, Path::top(2), 0) };
+        assert!(s.run("spec.removeParagraph", &json!({})).is_err());
     }
 
     #[test]
