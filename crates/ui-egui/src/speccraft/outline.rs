@@ -340,6 +340,7 @@ fn fill_ins(app: &mut WordApp, ui: &mut Ui) {
     }
     ui.separator();
     let mut action: Option<Value> = None;
+    let mut need_action: Option<Value> = None;
     let mut goto: Option<u64> = None;
     egui::ScrollArea::vertical().id_salt("spec_fill_ins").auto_shrink([false, false]).show(ui, |ui| {
         for f in &all {
@@ -367,6 +368,27 @@ fn fill_ins(app: &mut WordApp, ui: &mut Ui) {
                 if state != "open" && ui.small_button("↺").on_hover_text(tl!("Back to the master's wording")).clicked() {
                     action = Some(json!({"id": id, "reset": true}));
                 }
+                // W1: whether it must be filled in before issue.
+                let need = s("need");
+                let label = |n: &str| match n {
+                    "required" => tl!("Required"),
+                    "optional" => tl!("Optional"),
+                    _ => tl!("Unmarked"),
+                };
+                craft_ui::ComboBox::from_id_salt(("spec_field_need", &id))
+                    .selected_text(RichText::new(label(&need)).small().color(if need == "required" { t.red } else { t.text_dim }))
+                    .width(90.0)
+                    .show_ui(ui, |ui| {
+                        for (n, hint) in [
+                            ("required", tl!("Left open, it is an error: Publish stops")),
+                            ("optional", tl!("Left open, it prints as written and isn't reported")),
+                            ("default", tl!("Left open, it is a warning")),
+                        ] {
+                            if ui.selectable_label(need == n || (need.is_empty() && n == "default"), label(n)).on_hover_text(hint).clicked() {
+                                need_action = Some(json!({"id": id, "need": n}));
+                            }
+                        }
+                    });
             });
             ui.label(RichText::new(s("original")).small().color(t.text_dim));
             let options: Vec<String> = f
@@ -408,6 +430,11 @@ fn fill_ins(app: &mut WordApp, ui: &mut Ui) {
             ui.add_space(6.0);
         }
     });
+    if let Some(params) = need_action
+        && let Err(e) = app.run("spec.fields.need", params)
+    {
+        app.status(e);
+    }
     if let Some(params) = action {
         if let Some(id) = params.get("id").and_then(Value::as_str) {
             app.speccraft.drafts.remove(id);

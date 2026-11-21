@@ -27,7 +27,6 @@ pub(crate) struct Marked {
     pub origin: Origin,
     /// What the section's rules say about it now: a recommendation not followed, or a conflict.
     pub advice: Option<Standing>,
-    pub level: u8,
     pub pieces: Vec<(usize, wordcraft_geom::Rect)>,
 }
 
@@ -75,7 +74,7 @@ pub(crate) fn marked(app: &mut WordApp, layout: &Arc<DocLayout>) -> Arc<Vec<Mark
             let pieces = layout.selection_rects(doc, &e.range.start, &e.range.end, hint);
             let origin = origin_of.get(&e.id).copied().unwrap_or(Origin::Master);
             let advice = advice.get(&e.id).copied();
-            Marked { id: e.id, state, origin, advice, level: e.level.unwrap_or(1), pieces }
+            Marked { id: e.id, state, origin, advice, pieces }
         })
         .collect();
     let marked_fields: Vec<MarkedField> = fields::fields(doc)
@@ -180,14 +179,15 @@ pub(crate) fn paint(app: &mut WordApp, ui: &mut Ui, painter: &Painter, rects: &[
                 }
                 State::On | State::Linked => {}
             }
-            // The mark sits in the page's left margin, level by level, on the paragraph's first line.
+            // The mark sits in the page's left margin, all marks in one straight column (W2), on the
+            // paragraph's first line; the outline shows the levels.
             let Some(pr) = rects.get(*pi) else { continue };
             if k > 0 {
                 continue;
             }
             let scale = layout.pages.get(*pi).map_or(fallback_scale, |page| crate::canvas::page_screen_scale(*pr, page, fallback_scale));
             let size = (9.0 * scale).clamp(6.0, 14.0);
-            let x = pr.min.x + (18.0 + 6.0 * f32::from(m.level.min(7))) * scale;
+            let x = pr.min.x + 30.0 * scale;
             let center = Pos2::new(x, area.min.y + (size * 0.5 + 2.0 * scale).min(area.height() / 2.0));
             let mark = Rect::from_center_size(center, vec2(size, size));
             let (fill, stroke) = colors(&t, m.state);

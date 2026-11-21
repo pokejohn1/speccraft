@@ -134,9 +134,12 @@ fn fill_ins(doc: &Document, values: &BTreeMap<String, String>, by_block: &HashMa
         .into_iter()
         .filter(|f| f.state == FieldState::Open && f.range.start.path.0.first().is_some_and(|b| printing.contains(b)))
         .filter(|f| !filled_by_project(&f.original, values));
-    for f in open.take(MAX_EACH * 4) {
+    for f in open.filter(|f| f.need != fields::Need::Optional).take(MAX_EACH * 4) {
         let para = f.range.start.path.0.first().and_then(|b| by_block.get(b)).copied();
-        out.push(finding("warning", "fieldOpen", para, format!("fill-in {} is still open: {}", f.id, f.original)));
+        // Required ones (W1) are errors: Publish stops at them.
+        let (sev, code, what) =
+            if f.need == fields::Need::Required { ("error", "fieldRequired", "required fill-in") } else { ("warning", "fieldOpen", "fill-in") };
+        out.push(finding(sev, code, para, format!("{what} {} is still open: {}", f.id, f.original)));
     }
 }
 
@@ -402,6 +405,23 @@ mod tests {
         assert_eq!(fields, [&json!("p0004"), &json!("p0008")], "{found:?}");
         assert!(found.iter().any(|(c, p)| c == "sectionRule" && p == "p0005"), "{found:?}");
         assert!(!found.iter().any(|(c, _)| c == "bracketText"), "fill-ins are not reported twice: {found:?}");
+        // W1: required open is an error, optional open is nothing, and the printed copy agrees.
+        let f = s.run("spec.fields.list", &json!({})).unwrap();
+        let ids: Vec<String> = f["fields"].as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap().to_string()).collect();
+        s.run("spec.fields.need", &json!({"id": ids[0], "need": "required"})).unwrap();
+        s.run("spec.fields.need", &json!({"id": ids[1], "need": "optional"})).unwrap();
+        assert!(s.run("spec.fields.need", &json!({"id": ids[0], "need": "maybe"})).is_err());
+        let r = s.run("spec.check", &json!({})).unwrap();
+        let found: Vec<(String, Value)> =
+            r["findings"].as_array().unwrap().iter().map(|f| (f["code"].as_str().unwrap().to_string(), f["para"].clone())).collect();
+        assert!(found.iter().any(|(c, p)| c == "fieldRequired" && p == "p0004"), "{found:?}");
+        assert!(!found.iter().any(|(c, p)| c.starts_with("field") && p == "p0008"), "{found:?}");
+        assert_eq!(r["errors"], 1);
+        assert_eq!(s.run("spec.fields.list", &json!({})).unwrap()["fields"][1]["need"], "optional");
+        let (_, counts) = crate::cmd::spec::output::printable_copy(&s.doc).unwrap();
+        assert_eq!(counts.fields_open.len(), 1, "only the required one is reported when printing");
+        s.run("spec.fields.need", &json!({"id": ids[1], "need": "default"})).unwrap();
+        assert!(s.doc.custom_prop(crate::cmd::spec::fields::NEEDS_PROP).is_some_and(|v| !v.contains(&ids[1])));
     }
 
     #[test]

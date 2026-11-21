@@ -52,6 +52,8 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("spec.fields.detect", "Find Fill-ins", LOC, detect_cmd),
         CommandSpec::new("spec.fields.list", "List Fill-ins", LOC, list_cmd).pure(),
+        CommandSpec::new("spec.fields.need", "Required or Optional Fill-in", LOC, need_cmd)
+            .params(r#"{"id": string, "need": "required", "optional" or "default"}"#),
         CommandSpec::new("spec.fields.set", "Fill In", LOC, set_cmd).params(
             r#"{"id": string, "value"?: string or null (null: back to the master's wording), "option"?: n (index into the options), "omit"?: true (optional text only), "reset"?: true}"#,
         ),
@@ -102,6 +104,8 @@ impl FieldState {
 #[derive(Clone, Debug)]
 pub struct Field {
     pub id: String,
+    /// Required, optional, or neither (W1).
+    pub need: Need,
     pub kind: FieldKind,
     /// The control's title: "Choice", "Optional text", "Blank" or the fill-in's name.
     pub name: String,
@@ -114,6 +118,33 @@ pub struct Field {
     pub range: ControlRange,
 }
 
+/// Fill-ins marked required or optional (W1), by id: `"required"` or `"optional"`.
+pub const NEEDS_PROP: &str = "Speccraft.FieldNeeds";
+
+/// Whether a fill-in must be filled in before issue (W1). Left open, a required one is an error, an
+/// optional one is no finding (it prints as written), and one marked neither is a warning.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Need {
+    #[default]
+    Default,
+    Required,
+    Optional,
+}
+
+impl Need {
+    pub fn name(self) -> &'static str {
+        match self {
+            Need::Default => "default",
+            Need::Required => "required",
+            Need::Optional => "optional",
+        }
+    }
+}
+
+fn needs(doc: &Document) -> BTreeMap<String, String> {
+    doc.custom_prop(NEEDS_PROP).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default()
+}
+
 /// The originals property, read.
 fn originals(doc: &Document) -> BTreeMap<String, String> {
     doc.custom_prop(ORIGINALS_PROP).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default()
@@ -122,6 +153,7 @@ fn originals(doc: &Document) -> BTreeMap<String, String> {
 /// Every field control in the body, in document order.
 pub fn fields(doc: &Document) -> Vec<Field> {
     let saved = originals(doc);
+    let marked = needs(doc);
     let mut ranges = doc.control_ranges(StoryRef::Body);
     ranges.sort_by(|a, b| a.start.cmp(&b.start));
     let mut out = Vec::new();
@@ -147,7 +179,12 @@ pub fn fields(doc: &Document) -> Vec<Field> {
         } else {
             FieldState::Set
         };
-        out.push(Field { id, kind, name: r.control.title.clone(), options, original, value, state, range: r });
+        let need = match marked.get(&id).map(String::as_str) {
+            Some("required") => Need::Required,
+            Some("optional") => Need::Optional,
+            _ => Need::Default,
+        };
+        out.push(Field { id, need, kind, name: r.control.title.clone(), options, original, value, state, range: r });
     }
     out
 }
@@ -369,7 +406,9 @@ fn set_content(doc: &mut Document, f: &Field, text: &str) -> Result<(), CmdError
 /// follows), and list the fields still open, as `(name, original)`.
 pub fn resolve_for_print(doc: &mut Document) -> Vec<(String, String)> {
     let all = fields(doc);
-    let open: Vec<(String, String)> = all.iter().filter(|f| f.state == FieldState::Open).map(|f| (f.name.clone(), f.original.clone())).collect();
+    // Optional ones (W1) may stay open: they print as written, and nobody is told.
+    let open: Vec<(String, String)> =
+        all.iter().filter(|f| f.state == FieldState::Open && f.need != Need::Optional).map(|f| (f.name.clone(), f.original.clone())).collect();
     for f in all.iter().rev().filter(|f| f.state == FieldState::Omitted) {
         if set_content(doc, f, "").is_err() {
             continue;
@@ -406,6 +445,7 @@ fn field_json(f: &Field, para: Option<&sections::Entry>) -> Value {
         "original": f.original,
         "value": f.value,
         "state": f.state.name(),
+        "need": f.need.name(),
         "paragraph": para.map(|e| e.id.clone()),
         "prints": para.is_some_and(|e| e.on),
         "block": f.range.start.path.0.first(),
@@ -419,6 +459,30 @@ fn list_cmd(s: &mut Session, _v: &Value) -> CmdResult {
     let items: Vec<Value> = all.iter().map(|f| field_json(f, f.range.start.path.0.first().and_then(|b| by_block.get(b).copied()))).collect();
     let open_printing = items.iter().filter(|i| i["state"] == "open" && i["prints"] == true).count();
     Ok(json!({"fields": items, "count": items.len(), "openPrinting": open_printing}))
+}
+
+fn need_cmd(s: &mut Session, v: &Value) -> CmdResult {
+    let id = p::req_str(v, "id")?.trim().to_string();
+    let need = p::req_str(v, "need")?;
+    if !matches!(need, "required" | "optional" | "default") {
+        return Err(CmdError::Params("`need` must be \"required\", \"optional\" or \"default\"".into()));
+    }
+    if !fields(&s.doc).iter().any(|f| f.id == id) {
+        return Err(CmdError::Failed(format!("no fill-in called {id:?}")));
+    }
+    let mut marked = needs(&s.doc);
+    if need == "default" {
+        marked.remove(&id);
+    } else {
+        marked.insert(id.clone(), need.to_string());
+    }
+    if marked.is_empty() {
+        s.doc.remove_custom_prop(NEEDS_PROP);
+    } else {
+        let text = serde_json::to_string(&marked).map_err(|e| CmdError::Failed(e.to_string()))?;
+        s.doc.set_custom_prop(NEEDS_PROP, &text);
+    }
+    Ok(json!({"id": id, "need": need}))
 }
 
 fn set_cmd(s: &mut Session, v: &Value) -> CmdResult {
