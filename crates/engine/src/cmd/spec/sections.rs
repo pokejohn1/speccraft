@@ -87,7 +87,8 @@ impl Kind {
 /// no recognised style is `Other` at level 1, so it can still be switched on and off; [`outline`]
 /// never makes it the parent of later paragraphs.
 pub fn classify(style: Option<&str>, text: &str) -> (Kind, Option<u8>) {
-    if text.trim_start_matches(|c: char| c.is_whitespace() || c == OBJ).starts_with(NOTE_PREFIX) {
+    let bare = text.trim_matches(|c: char| c.is_whitespace() || c == OBJ);
+    if bare.starts_with(NOTE_PREFIX) || is_starred_note(bare) {
         return (Kind::Note, None);
     }
     match style.unwrap_or("") {
@@ -125,6 +126,12 @@ pub fn style_level(style: &str) -> Option<u8> {
         return None;
     }
     rest.parse::<u8>().ok()
+}
+
+/// An author note written in the body between asterisks ("*Retain for …*"), as some office
+/// masters do (M18): never selectable, never printed.
+fn is_starred_note(bare: &str) -> bool {
+    bare.chars().count() >= 4 && bare.starts_with('*') && bare.ends_with('*') && !bare.trim_matches('*').trim().is_empty()
 }
 
 /// "END OF SECTION …" closes a section, whatever its style.
@@ -434,7 +441,7 @@ fn change_result(entries: &[Entry], on: &[bool]) -> Value {
 
 /// Switch items on, in document order. Refused (changing nothing) for a note, or when an item's
 /// parent is off; switching on does not switch on children.
-fn activate(s: &mut Session, v: &Value) -> CmdResult {
+pub(crate) fn activate(s: &mut Session, v: &Value) -> CmdResult {
     let entries = outline(&s.doc);
     let targets = targets(v, &entries)?;
     let mut on: Vec<bool> = entries.iter().map(|e| e.on).collect();

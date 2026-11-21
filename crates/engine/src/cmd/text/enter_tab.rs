@@ -62,6 +62,11 @@ pub(super) fn new_paragraph(s: &mut Session, _: &Value) -> CmdResult {
     if crate::cmd::controls::refuses_paragraph(s) {
         return sel_result(s);
     }
+    // Speccraft (M18): Enter in a section paragraph adds a managed paragraph.
+    if let Some(r) = crate::cmd::spec::paragraphs::enter(s) {
+        r?;
+        return sel_result(s);
+    }
     enter(s, true)?;
     sel_result(s)
 }

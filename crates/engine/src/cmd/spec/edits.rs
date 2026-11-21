@@ -262,7 +262,10 @@ pub(crate) fn set_paragraph_text(doc: &mut Document, e: &Entry, text: &str) -> R
 
 /// Insert a new paragraph at body index `at` and make it spec paragraph `id`.
 pub(crate) fn insert_item(s: &mut Session, at: usize, style: &str, text: &str, id: &str, props: wordcraft_doc::CharProps) -> Result<(), CmdError> {
-    let mut para = Paragraph::with_text(text, props);
+    // An empty paragraph gets a space to wrap (a control around nothing would be inline), taken
+    // out again below.
+    let empty = text.is_empty();
+    let mut para = Paragraph::with_text(if empty { " " } else { text }, props);
     if !style.is_empty() {
         para = para.styled(style);
     }
@@ -272,18 +275,23 @@ pub(crate) fn insert_item(s: &mut Session, at: usize, style: &str, text: &str, i
     let path = Path::top(at);
     s.sel = Selection { anchor: Pos::new(StoryRef::Body, path.clone(), 0), focus: Pos::new(StoryRef::Body, path.clone(), len) };
     super::super::controls::insert(s, &json!({"tag": format!("{}{id}", super::TAG_PREFIX)}), ControlKind::RichText)?;
+    if empty {
+        let a = Pos::new(StoryRef::Body, path.clone(), OBJ.len_utf8());
+        let b = Pos::new(StoryRef::Body, path.clone(), OBJ.len_utf8() + 1);
+        s.doc.delete_range(&a, &b).map_err(|e| CmdError::Failed(e.to_string()))?;
+    }
     s.sel = Selection::caret(Pos::new(StoryRef::Body, path, OBJ.len_utf8()));
     Ok(())
 }
 
 /// A fresh id for a paragraph written in the project: `u0001`, `u0002`, …
-fn new_user_id(entries: &[Entry]) -> String {
+pub(crate) fn new_user_id(entries: &[Entry]) -> String {
     let top = entries.iter().filter_map(|e| e.id.strip_prefix('u').and_then(|n| n.parse::<u32>().ok())).max().unwrap_or(0);
     format!("u{:04}", top.saturating_add(1))
 }
 
 /// The body index after paragraph `i` and everything under it.
-fn after_branch(entries: &[Entry], i: usize) -> usize {
+pub(crate) fn after_branch(entries: &[Entry], i: usize) -> usize {
     let mut last = i;
     let mut under = vec![i];
     for (k, e) in entries.iter().enumerate().skip(i + 1) {
@@ -299,7 +307,7 @@ fn after_branch(entries: &[Entry], i: usize) -> usize {
 
 /// Switch paragraph `id` on if its parent prints (otherwise it stays off).
 fn switch_on_if_possible(s: &mut Session, id: &str) -> bool {
-    s.run("spec.activate", &json!({"id": id})).is_ok()
+    sections::activate(s, &json!({"id": id})).is_ok()
 }
 
 fn restore_cmd(s: &mut Session, v: &Value) -> CmdResult {
@@ -355,7 +363,7 @@ fn duplicate_cmd(s: &mut Session, v: &Value) -> CmdResult {
 }
 
 /// The style of the next level down: Part → Article → PR1 … PR5.
-fn child_style(style: &str) -> Option<String> {
+pub(crate) fn child_style(style: &str) -> Option<String> {
     let known = match style.to_ascii_uppercase().as_str() {
         "SCT" => Some("PRT"),
         "PRT" => Some("ART"),
@@ -398,7 +406,8 @@ fn add_cmd(s: &mut Session, v: &Value) -> CmdResult {
     let props = para.props_of_char(e.range.content_start().off).clone();
     let id = new_user_id(&entries);
     insert_item(s, at, &style, &text, &id, props)?;
-    let on = switch_on_if_possible(s, &id);
+    // Switched on unless the author turned Auto-Select New off (M18).
+    let on = super::paragraphs::auto_select(&s.doc) && switch_on_if_possible(s, &id);
     Ok(json!({"id": id, "style": style, "on": on}))
 }
 

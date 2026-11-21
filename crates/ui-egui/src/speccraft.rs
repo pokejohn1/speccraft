@@ -522,6 +522,13 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
         big(ui, app, "plus", "Add\nParagraph", "spec.addParagraph", json!({}), false);
         big(ui, app, "copy", "Duplicate", "spec.duplicate", json!({}), false);
         big(ui, app, "recover", "Restore\nWording", "spec.restore", json!({}), false);
+        big(ui, app, "clear", "Delete\nAdded", "ui.spec.deleteAdded", json!({}), false);
+        big(ui, app, "indent", "Indent", "spec.indent", json!({"by": 1}), false);
+        big(ui, app, "outdent", "Outdent", "spec.indent", json!({"by": -1}), false);
+        big(ui, app, "numbering", "No\nNumber", "spec.noNumber", json!({}), false);
+        big(ui, app, "multilevel", "Fix\nHierarchy", "spec.fixHierarchy", json!({}), false);
+        let auto = wordcraft_engine::cmd::spec::paragraphs::auto_select(&app.session.doc);
+        big(ui, app, "check", "Auto-Select\nNew", "spec.autoSelectNew", json!({"value": !auto}), auto);
     });
 }
 

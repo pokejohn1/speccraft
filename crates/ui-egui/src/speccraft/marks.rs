@@ -321,6 +321,15 @@ fn mark_menu(ui: &mut Ui, m: &Marked) -> Option<(&'static str, serde_json::Value
     if ui.button(tl!("Duplicate Paragraph")).clicked() {
         out = Some(("spec.duplicate", json!({"id": id})));
     }
+    if ui.button(tl!("Indent")).clicked() {
+        out = Some(("spec.indent", json!({"id": id, "by": 1})));
+    }
+    if ui.button(tl!("Outdent")).clicked() {
+        out = Some(("spec.indent", json!({"id": id, "by": -1})));
+    }
+    if ui.button(tl!("No Autonumber")).clicked() {
+        out = Some(("spec.noNumber", json!({"id": id})));
+    }
     if m.origin == Origin::Modified && ui.button(tl!("Restore Master Wording")).clicked() {
         out = Some(("spec.restore", json!({"id": id})));
     }
