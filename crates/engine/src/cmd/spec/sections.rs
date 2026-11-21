@@ -99,8 +99,35 @@ pub fn classify(style: Option<&str>, text: &str) -> (Kind, Option<u8>) {
         "PR4" => (Kind::Para, Some(6)),
         "PR5" => (Kind::Para, Some(7)),
         "CMT" => (Kind::Note, None),
-        _ => (Kind::Other, Some(1)),
+        other => match style_level(other) {
+            // Masters that number their levels in the style name ("CSILevel3", "Level 3"):
+            // 0 title, 1 Part, 2 Article, 3 and down paragraphs; the end line by its text.
+            Some(_) if is_end_line(text) => (Kind::End, Some(1)),
+            Some(0) => (Kind::Title, Some(0)),
+            Some(1) => (Kind::Part, Some(1)),
+            Some(2) => (Kind::Article, Some(2)),
+            Some(n) => (Kind::Para, Some(n.min(9))),
+            None if is_end_line(text) => (Kind::End, Some(1)),
+            None => (Kind::Other, Some(1)),
+        },
     }
+}
+
+/// The level a style's name gives, for names like `CSILevel3`, `Level 3`, `SpecLevel-3`: the
+/// digit after "level", at the end of the name.
+pub fn style_level(style: &str) -> Option<u8> {
+    let low = style.to_ascii_lowercase();
+    let at = low.rfind("level")?;
+    let rest = low.get(at + 5..)?.trim_start_matches([' ', '-', '_']);
+    if rest.is_empty() || rest.len() > 1 {
+        return None;
+    }
+    rest.parse::<u8>().ok()
+}
+
+/// "END OF SECTION …" closes a section, whatever its style.
+fn is_end_line(text: &str) -> bool {
+    text.trim_start_matches(|c: char| c.is_whitespace() || c == OBJ).get(..14).is_some_and(|h| h.eq_ignore_ascii_case("end of section"))
 }
 
 /// One section paragraph: a spec item that is a block control around one top-level body paragraph.
@@ -708,6 +735,17 @@ mod tests {
             assert_eq!(classify(Some(style), "x"), (Kind::Para, Some(n as u8 + 3)), "{style}");
         }
         assert_eq!(classify(Some("CMT"), "x"), (Kind::Note, None));
+        // Level-numbered style names (I3: the author's CSILevel masters).
+        assert_eq!(classify(Some("CSILevel0"), "Section 099123 Interior Painting"), (Kind::Title, Some(0)));
+        assert_eq!(classify(Some("CSILevel0"), "END OF SECTION  099123"), (Kind::End, Some(1)));
+        assert_eq!(classify(Some("CSILevel1"), "GENERAL"), (Kind::Part, Some(1)));
+        assert_eq!(classify(Some("CSILevel2"), "SECTION INCLUDES"), (Kind::Article, Some(2)));
+        assert_eq!(classify(Some("CSILevel3"), "Surface preparation."), (Kind::Para, Some(3)));
+        assert_eq!(classify(Some("CSILevel5"), "x"), (Kind::Para, Some(5)));
+        assert_eq!(classify(Some("Level 4"), "x"), (Kind::Para, Some(4)));
+        assert_eq!(classify(Some("Normal"), "END OF SECTION"), (Kind::End, Some(1)));
+        assert_eq!(classify(Some("Heading1"), "x"), (Kind::Other, Some(1)), "not a level name");
+        assert_eq!(classify(Some("Level12"), "x"), (Kind::Other, Some(1)));
         assert_eq!(classify(Some("PR3"), " \t// note"), (Kind::Note, None));
         assert_eq!(classify(None, "x"), (Kind::Other, Some(1)));
         assert_eq!(classify(Some("Normal"), "a // b"), (Kind::Other, Some(1)));
