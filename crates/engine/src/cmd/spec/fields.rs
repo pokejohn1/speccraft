@@ -55,8 +55,10 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("spec.fields.need", "Required or Optional Fill-in", LOC, need_cmd)
             .params(r#"{"id": string, "need": "required", "optional" or "default"}"#),
         CommandSpec::new("spec.fields.set", "Fill In", LOC, set_cmd).params(
-            r#"{"id": string, "value"?: string or null (null: back to the master's wording), "option"?: n (index into the options), "omit"?: true (optional text only), "reset"?: true}"#,
+            r#"{"id": string, "value"?: string or null (null: back to the master's wording), "option"?: n (index into the options), "fill"?: string (with "option": the text for a blank in that option), "options"?: [n] (a multiple choice: the options chosen), "omit"?: true (optional text only), "reset"?: true}"#,
         ),
+        CommandSpec::new("spec.fields.multiple", "Multiple Choice", LOC, multiple_cmd)
+            .params(r#"{"id": string, "value"?: bool (default: the opposite of now), "joiner"?: "and" | "or"}"#),
     ]
 }
 
@@ -115,7 +117,73 @@ pub struct Field {
     /// What the field holds now.
     pub value: String,
     pub state: FieldState,
+    /// A choice where several options can be chosen (M19); they print as a list.
+    pub multiple: bool,
+    /// The options chosen in a multiple choice, by index.
+    pub chosen: Vec<usize>,
+    /// The field is a measurement (M19: shown in its own colour).
+    pub measure: bool,
     pub range: ControlRange,
+}
+
+/// Document property: the multiple-choice fields (M19), as JSON
+/// `{"f0001": {"chosen": [0, 2], "joiner": "and"}, …}`.
+pub const MULTI_PROP: &str = "Speccraft.FieldMulti";
+
+/// One multiple-choice field's record.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Multi {
+    #[serde(default)]
+    pub chosen: Vec<usize>,
+    #[serde(default = "default_joiner")]
+    pub joiner: String,
+}
+
+fn default_joiner() -> String {
+    "and".into()
+}
+
+fn multis(doc: &Document) -> BTreeMap<String, Multi> {
+    doc.custom_prop(MULTI_PROP).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default()
+}
+
+fn write_multis(doc: &mut Document, m: &BTreeMap<String, Multi>) -> Result<(), CmdError> {
+    if m.is_empty() {
+        doc.remove_custom_prop(MULTI_PROP);
+    } else {
+        let text = serde_json::to_string(m).map_err(|e| CmdError::Failed(e.to_string()))?;
+        doc.set_custom_prop(MULTI_PROP, &text);
+    }
+    Ok(())
+}
+
+/// Items as a list in a sentence: "a", "a and b", "a, b, and c".
+pub fn join_list(items: &[&str], joiner: &str) -> String {
+    match items {
+        [] => String::new(),
+        [a] => (*a).to_string(),
+        [a, b] => format!("{a} {joiner} {b}"),
+        [rest @ .., last] => format!("{}, {joiner} {last}", rest.join(", ")),
+    }
+}
+
+/// Whether an option holds a blank to type into ("___", "<Insert …>").
+pub fn has_blank(option: &str) -> bool {
+    option.contains("___") || option.contains("<Insert")
+}
+
+/// `option` with its first blank replaced by `fill`.
+fn fill_blank(option: &str, fill: &str) -> String {
+    if let Some(a) = option.find("___") {
+        let len = option.get(a..).unwrap_or("").chars().take_while(|c| *c == '_').count();
+        return format!("{}{fill}{}", option.get(..a).unwrap_or(""), option.get(a + len..).unwrap_or(""));
+    }
+    if let Some(a) = option.find("<Insert")
+        && let Some(b) = option.get(a..).and_then(|r| r.find('>')).map(|k| k + a)
+    {
+        return format!("{}{fill}{}", option.get(..a).unwrap_or(""), option.get(b + 1..).unwrap_or(""));
+    }
+    fill.to_string()
 }
 
 /// Fill-ins marked required or optional (W1), by id: `"required"` or `"optional"`.
@@ -154,6 +222,7 @@ fn originals(doc: &Document) -> BTreeMap<String, String> {
 pub fn fields(doc: &Document) -> Vec<Field> {
     let saved = originals(doc);
     let marked = needs(doc);
+    let multi = multis(doc);
     let mut ranges = doc.control_ranges(StoryRef::Body);
     ranges.sort_by(|a, b| a.start.cmp(&b.start));
     let mut out = Vec::new();
@@ -184,7 +253,23 @@ pub fn fields(doc: &Document) -> Vec<Field> {
             Some("optional") => Need::Optional,
             _ => Need::Default,
         };
-        out.push(Field { id, need, kind, name: r.control.title.clone(), options, original, value, state, range: r });
+        let m = multi.get(&id).filter(|_| kind == FieldKind::Choice);
+        let chosen: Vec<usize> = m.map(|m| m.chosen.iter().copied().filter(|i| *i < options.len()).collect()).unwrap_or_default();
+        let measure = options.iter().any(|o| super::units::is_measure(o)) || super::units::is_measure(&original);
+        out.push(Field {
+            id,
+            need,
+            kind,
+            name: r.control.title.clone(),
+            options,
+            original,
+            value,
+            state,
+            multiple: m.is_some(),
+            chosen,
+            measure,
+            range: r,
+        });
     }
     out
 }
@@ -446,6 +531,9 @@ fn field_json(f: &Field, para: Option<&sections::Entry>) -> Value {
         "value": f.value,
         "state": f.state.name(),
         "need": f.need.name(),
+        "multiple": f.multiple,
+        "chosen": f.chosen,
+        "measure": f.measure,
         "paragraph": para.map(|e| e.id.clone()),
         "prints": para.is_some_and(|e| e.on),
         "block": f.range.start.path.0.first(),
@@ -489,15 +577,45 @@ fn set_cmd(s: &mut Session, v: &Value) -> CmdResult {
     let id = p::req_str(v, "id")?.trim().to_string();
     let all = fields(&s.doc);
     let f = all.iter().find(|f| f.id == id).ok_or_else(|| CmdError::Failed(format!("no fill-in called {id:?}")))?;
+    let mut chosen: Option<Vec<usize>> = None;
     let text = if p::bool(v, "reset") == Some(true) || v.get("value").is_some_and(Value::is_null) {
+        chosen = Some(Vec::new());
         f.original.clone()
+    } else if let Some(list) = v.get("options") {
+        if !f.multiple {
+            return Err(CmdError::Params(format!("{id:?} is not a multiple choice (spec.fields.multiple)")));
+        }
+        let list = list.as_array().ok_or_else(|| CmdError::Params("`options` must be a list of option numbers".into()))?;
+        let mut picked: Vec<usize> = Vec::new();
+        for x in list.iter().take(MAX_OPTIONS) {
+            let i = x.as_u64().and_then(|i| usize::try_from(i).ok()).filter(|i| *i < f.options.len());
+            picked.push(i.ok_or_else(|| CmdError::Params(format!("option {x} doesn't exist")))?);
+        }
+        picked.sort_unstable();
+        picked.dedup();
+        let joiner = multis(&s.doc).get(&id).map_or_else(default_joiner, |m| m.joiner.clone());
+        let names: Vec<&str> = picked.iter().filter_map(|i| f.options.get(*i)).map(String::as_str).collect();
+        let text = if names.is_empty() { f.original.clone() } else { join_list(&names, &joiner) };
+        chosen = Some(picked);
+        text
     } else if p::bool(v, "omit") == Some(true) {
         if f.kind != FieldKind::Optional {
             return Err(CmdError::Params("only optional text can be left out".into()));
         }
         OMIT.to_string()
     } else if let Some(i) = p::u64(v, "option") {
-        f.options.get(usize::try_from(i).unwrap_or(usize::MAX)).cloned().ok_or_else(|| CmdError::Params(format!("option {i} doesn't exist")))?
+        let at = usize::try_from(i).unwrap_or(usize::MAX);
+        let option = f.options.get(at).cloned().ok_or_else(|| CmdError::Params(format!("option {i} doesn't exist")))?;
+        if f.multiple {
+            chosen = Some(vec![at]);
+        }
+        match p::str(v, "fill") {
+            Some(fill) if fill.chars().count() > MAX_VALUE || fill.contains(['\n', '\r', OBJ]) => {
+                return Err(CmdError::Params(format!("`fill` must be one line of at most {MAX_VALUE} characters")));
+            }
+            Some(fill) if !fill.trim().is_empty() => fill_blank(&option, fill.trim()),
+            _ => option,
+        }
     } else if let Some(t) = p::str(v, "value") {
         if t.chars().count() > MAX_VALUE || t.contains(['\n', '\r', OBJ]) {
             return Err(CmdError::Params(format!("`value` must be one line of at most {MAX_VALUE} characters")));
@@ -507,8 +625,59 @@ fn set_cmd(s: &mut Session, v: &Value) -> CmdResult {
         return Err(CmdError::Params("give `value`, `option`, `omit` or `reset`".into()));
     };
     set_content(&mut s.doc, f, &text)?;
+    if f.multiple {
+        let mut m = multis(&s.doc);
+        if let Some(rec) = m.get_mut(&id) {
+            rec.chosen = chosen.unwrap_or_default();
+        }
+        write_multis(&mut s.doc, &m)?;
+    }
     let after = fields(&s.doc).into_iter().find(|x| x.id == id);
     Ok(json!({"id": id, "value": text, "state": after.map_or("open", |f| f.state.name())}))
+}
+
+/// Make a choice one where several options can be chosen, or one option again.
+fn multiple_cmd(s: &mut Session, v: &Value) -> CmdResult {
+    let id = p::req_str(v, "id")?.trim().to_string();
+    let all = fields(&s.doc);
+    let f = all.iter().find(|f| f.id == id).ok_or_else(|| CmdError::Failed(format!("no fill-in called {id:?}")))?;
+    if f.kind != FieldKind::Choice {
+        return Err(CmdError::Failed(format!("{id:?} is not a choice")));
+    }
+    let joiner = match p::str(v, "joiner") {
+        None => None,
+        Some(j @ ("and" | "or")) => Some(j.to_string()),
+        Some(_) => return Err(CmdError::Params("`joiner` must be \"and\" or \"or\"".into())),
+    };
+    // Giving only a joiner keeps it a multiple choice.
+    let want = match v.get("value") {
+        None | Some(Value::Null) => joiner.is_some() || !f.multiple,
+        Some(x) => x.as_bool().ok_or_else(|| CmdError::Params("`value` must be true or false".into()))?,
+    };
+    let mut m = multis(&s.doc);
+    if want {
+        let rec = m.entry(id.clone()).or_insert_with(|| Multi {
+            // An option already chosen stays chosen.
+            chosen: f.options.iter().position(|o| f.state == FieldState::Set && *o == f.value).into_iter().collect(),
+            joiner: default_joiner(),
+        });
+        if let Some(j) = joiner {
+            rec.joiner = j;
+        }
+        let rec = rec.clone();
+        write_multis(&mut s.doc, &m)?;
+        // The value follows the record (the joiner may have changed).
+        if !rec.chosen.is_empty() {
+            let names: Vec<&str> = rec.chosen.iter().filter_map(|i| f.options.get(*i)).map(String::as_str).collect();
+            set_content(&mut s.doc, f, &join_list(&names, &rec.joiner))?;
+        }
+    } else {
+        let first = m.remove(&id).and_then(|r| r.chosen.first().copied());
+        write_multis(&mut s.doc, &m)?;
+        let text = first.and_then(|i| f.options.get(i)).cloned().unwrap_or_else(|| f.original.clone());
+        set_content(&mut s.doc, f, &text)?;
+    }
+    Ok(json!({"id": id, "multiple": want}))
 }
 
 #[cfg(test)]
@@ -612,6 +781,57 @@ mod tests {
         assert_eq!(text(&s, 3), "Thickness: [1/2 inch] [5/8 inch], [factory primed] and tapered.");
         run(&mut s, "edit.undo", json!({}));
         assert_eq!(text(&s, 3), "Thickness: [1/2 inch] [5/8 inch], (leave out) and tapered.");
+    }
+
+    #[test]
+    fn a_multiple_choice_prints_its_options_as_a_list() {
+        let mut d = Document::new();
+        d.body = vec![
+            para("SCT", "SECTION 05 1200 - STRUCTURAL STEEL"),
+            para("PR1", "Indicate [profiles] [sizes] [spacing] [openings] [attachments] on shop drawings."),
+            para("PR1", "Finish: [shop primed] [galvanized] [other: ___]."),
+            para("PR1", "Studs 4 inches (100 mm) deep: [16 gage] [18 gage]."),
+        ];
+        let mut s = Session::new(d);
+        run(&mut s, "spec.import", json!({}));
+        run(&mut s, "spec.fields.detect", json!({}));
+        let text = |s: &Session, block: usize| s.doc.body[block].as_para().unwrap().plain_text().replace(OBJ, "");
+        assert!(s.run("spec.fields.set", &json!({"id": "f0001", "options": [0]})).is_err(), "single choice");
+        run(&mut s, "spec.fields.set", json!({"id": "f0001", "option": 1}));
+        assert_eq!(run(&mut s, "spec.fields.multiple", json!({"id": "f0001"}))["multiple"], true);
+        let f = run(&mut s, "spec.fields.list", json!({}))["fields"][0].clone();
+        assert_eq!((f["multiple"].clone(), f["chosen"].clone()), (json!(true), json!([1])), "what was chosen stays chosen");
+        run(&mut s, "spec.fields.set", json!({"id": "f0001", "options": [4, 0, 3, 1]}));
+        assert_eq!(text(&s, 1), "Indicate profiles, sizes, openings, and attachments on shop drawings.");
+        run(&mut s, "spec.fields.multiple", json!({"id": "f0001", "joiner": "or"}));
+        assert_eq!(text(&s, 1), "Indicate profiles, sizes, openings, or attachments on shop drawings.");
+        run(&mut s, "spec.fields.set", json!({"id": "f0001", "options": [0, 2]}));
+        assert_eq!(text(&s, 1), "Indicate profiles or spacing on shop drawings.");
+        // Saved and opened again.
+        let bytes = crate::io::save_bytes("x.docx", &s.doc).unwrap();
+        let mut b = Session::new(crate::io::open_bytes("x.docx", &bytes).unwrap());
+        assert_eq!(run(&mut b, "spec.fields.list", json!({}))["fields"][0]["chosen"], json!([0, 2]));
+        // One option again: the first chosen.
+        run(&mut s, "spec.fields.multiple", json!({"id": "f0001", "value": false}));
+        assert_eq!(text(&s, 1), "Indicate profiles on shop drawings.");
+        // A choice with a blank in it.
+        run(&mut s, "spec.fields.set", json!({"id": "f0002", "option": 2, "fill": "powder coated"}));
+        assert_eq!(text(&s, 2), "Finish: other: powder coated.");
+        // Measurements.
+        let list = run(&mut s, "spec.fields.list", json!({}));
+        let measure: Vec<bool> = list["fields"].as_array().unwrap().iter().map(|f| f["measure"].as_bool().unwrap()).collect();
+        assert_eq!(measure, [false, false, true]);
+    }
+
+    #[test]
+    fn lists_join_as_in_a_sentence() {
+        assert_eq!(join_list(&[], "and"), "");
+        assert_eq!(join_list(&["a"], "and"), "a");
+        assert_eq!(join_list(&["a", "b"], "or"), "a or b");
+        assert_eq!(join_list(&["a", "b", "c"], "and"), "a, b, and c");
+        assert_eq!(fill_blank("other: ___", "x"), "other: x");
+        assert_eq!(fill_blank("<Insert colour> finish", "red"), "red finish");
+        assert!(has_blank("other: ___") && !has_blank("other"));
     }
 
     #[test]

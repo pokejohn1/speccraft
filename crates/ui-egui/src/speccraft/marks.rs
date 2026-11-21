@@ -10,7 +10,7 @@ use std::sync::Arc;
 use egui::{Color32, Painter, Rect, Sense, Stroke, Ui, pos2, vec2};
 use serde_json::json;
 use wordcraft_engine::cmd::spec::edits::{self, Origin};
-use wordcraft_engine::cmd::spec::fields::{self, FieldState};
+use wordcraft_engine::cmd::spec::fields::{self, Field, FieldKind, FieldState};
 use wordcraft_engine::cmd::spec::rules::{self, Standing};
 use wordcraft_engine::cmd::spec::sections::{self, State};
 use wordcraft_layout::DocLayout;
@@ -37,8 +37,19 @@ pub(crate) struct Marked {
 /// A fill-in as the page shows it: its state and where its text is.
 #[derive(Clone)]
 pub(crate) struct MarkedField {
-    pub state: FieldState,
+    pub field: Field,
     pub pieces: Vec<(usize, wordcraft_geom::Rect)>,
+}
+
+/// A fill-in's colour on the page (M19): measurements green, choices blue, blanks red.
+fn field_color(t: &Tokens, f: &Field) -> Color32 {
+    if f.measure {
+        t.green
+    } else if matches!(f.kind, FieldKind::Choice | FieldKind::Optional) {
+        t.blue
+    } else {
+        t.red
+    }
 }
 
 /// The marks of a document revision laid out one way.
@@ -84,7 +95,10 @@ pub(crate) fn marked(app: &mut WordApp, layout: &Arc<DocLayout>) -> Arc<Vec<Mark
         .collect();
     let marked_fields: Vec<MarkedField> = fields::fields(doc)
         .into_iter()
-        .map(|f| MarkedField { state: f.state, pieces: layout.selection_rects(doc, &f.range.content_start(), &f.range.end, hint) })
+        .map(|f| {
+            let pieces = layout.selection_rects(doc, &f.range.content_start(), &f.range.end, hint);
+            MarkedField { field: f, pieces }
+        })
         .collect();
     let items = Arc::new(items);
     app.speccraft.marks_cache = Some(MarksCache { rev, layout: layout.clone(), items: items.clone(), fields: Arc::new(marked_fields) });
@@ -139,29 +153,7 @@ pub(crate) fn paint(app: &mut WordApp, ui: &mut Ui, painter: &Painter, rects: &[
     }
     let t = Tokens::get(ui.ctx());
     let clip = ui.clip_rect();
-    // Fill-ins: open ones tinted, chosen ones underlined, left-out text struck through.
-    for f in marked_fields(app).iter() {
-        for (pi, r) in &f.pieces {
-            let Some(pr) = rects.get(*pi) else { continue };
-            let scale = layout.pages.get(*pi).map_or(fallback_scale, |page| crate::canvas::page_screen_scale(*pr, page, fallback_scale));
-            let sr = Rect::from_min_size(pos2(pr.min.x + r.x * scale, pr.min.y + r.y * scale), vec2(r.w * scale, r.h * scale));
-            if !sr.intersects(clip) {
-                continue;
-            }
-            match f.state {
-                FieldState::Open => {
-                    painter.rect_filled(sr, 2.0, t.orange.gamma_multiply(0.18));
-                }
-                FieldState::Set => {
-                    painter.line_segment([sr.left_bottom(), sr.right_bottom()], Stroke::new(1.0, t.accent.gamma_multiply(0.7)));
-                }
-                FieldState::Omitted => {
-                    let y = sr.center().y;
-                    painter.line_segment([pos2(sr.min.x, y), pos2(sr.max.x, y)], Stroke::new(1.0, t.text_disabled));
-                }
-            }
-        }
-    }
+    paint_fields(app, ui, painter, rects, layout, fallback_scale);
     let mut clicked: Option<String> = None;
     let mut action: Option<(&'static str, serde_json::Value)> = None;
     for m in items.iter() {
@@ -340,4 +332,96 @@ fn mark_menu(ui: &mut Ui, m: &Marked) -> Option<(&'static str, serde_json::Value
         ui.close();
     }
     out
+}
+
+/// The list of an open choice on the page (M19), until something is chosen or the page is
+/// clicked elsewhere.
+fn choice_popup(app: &mut WordApp, ui: &mut Ui, t: &Tokens, frame: u64) {
+    let Some((id, at, opened)) = app.speccraft.choice_popup.clone() else { return };
+    let Some(choice) = marked_fields(app).iter().find(|f| f.field.id == id).and_then(|f| super::choices::Choice::of(&f.field)) else {
+        app.speccraft.choice_popup = None;
+        return;
+    };
+    let mut fill = std::mem::take(&mut app.speccraft.choice_fill);
+    let mut action = None;
+    let area = egui::Area::new(ui.scope_id().with("spec_choice_popup")).order(egui::Order::Foreground).fixed_pos(at).show(ui.ctx(), |ui| {
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            ui.set_max_width(320.0);
+            action = super::choices::list(ui, t, &choice, &mut fill);
+        });
+    });
+    app.speccraft.choice_fill = fill;
+    let outside = ui.input(|i| i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p)));
+    let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    if let Some((cmd, params)) = action {
+        // A multiple choice stays open for the next tick; one option closes it.
+        if !choice.multiple || cmd != "spec.fields.set" {
+            app.speccraft.choice_popup = None;
+        }
+        if let Err(e) = app.run(cmd, params) {
+            app.status(e);
+        }
+    } else if escape || (outside && frame > opened) {
+        app.speccraft.choice_popup = None;
+    }
+}
+
+/// Paint the fill-ins (M19) and handle clicks on choices.
+fn paint_fields(app: &mut WordApp, ui: &mut Ui, painter: &Painter, rects: &[Rect], layout: &Arc<DocLayout>, fallback_scale: f32) {
+    let t = Tokens::get(ui.ctx());
+    let clip = ui.clip_rect();
+    // Fill-ins: open ones tinted, chosen ones underlined, left-out text struck through, each in
+    // its kind's colour. A click on a choice opens its list; a double click puts the caret in it.
+    let mut open_choice: Option<(String, egui::Pos2)> = None;
+    let mut caret_into: Option<wordcraft_doc::Pos> = None;
+    for f in marked_fields(app).iter() {
+        let color = field_color(&t, &f.field);
+        let mut first: Option<Rect> = None;
+        for (pi, r) in &f.pieces {
+            let Some(pr) = rects.get(*pi) else { continue };
+            let scale = layout.pages.get(*pi).map_or(fallback_scale, |page| crate::canvas::page_screen_scale(*pr, page, fallback_scale));
+            let sr = Rect::from_min_size(pos2(pr.min.x + r.x * scale, pr.min.y + r.y * scale), vec2(r.w * scale, r.h * scale));
+            if !sr.intersects(clip) {
+                continue;
+            }
+            first.get_or_insert(sr);
+            match f.field.state {
+                FieldState::Open => {
+                    painter.rect_filled(sr, 2.0, color.gamma_multiply(0.16));
+                }
+                FieldState::Set => {
+                    painter.line_segment([sr.left_bottom(), sr.right_bottom()], Stroke::new(1.0, color.gamma_multiply(0.8)));
+                }
+                FieldState::Omitted => {
+                    let y = sr.center().y;
+                    painter.line_segment([pos2(sr.min.x, y), pos2(sr.max.x, y)], Stroke::new(1.0, t.text_disabled));
+                }
+            }
+        }
+        if let Some(area) = first
+            && matches!(f.field.kind, FieldKind::Choice | FieldKind::Optional)
+        {
+            let resp = ui.interact(area, ui.scope_id().with(("spec_choice", &f.field.id)), Sense::click());
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if resp.double_clicked() {
+                caret_into = Some(f.field.range.content_start());
+            } else if resp.clicked() {
+                open_choice = Some((f.field.id.clone(), area.left_bottom() + vec2(0.0, 2.0)));
+            }
+        }
+    }
+    let frame = ui.ctx().cumulative_frame_nr();
+    if let Some((id, at)) = open_choice {
+        app.speccraft.choice_popup = Some((id, at, frame));
+        app.speccraft.choice_fill.clear();
+    }
+    if let Some(pos) = caret_into {
+        app.speccraft.choice_popup = None;
+        if app.run("caret.set", json!({"pos": wordcraft_engine::cmd::pos_json(&pos)})).is_err() {
+            app.status(tl!("Couldn't put the caret in the fill-in"));
+        }
+    }
+    choice_popup(app, ui, &t, frame);
 }

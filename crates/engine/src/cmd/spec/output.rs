@@ -139,6 +139,8 @@ pub fn printable_copy_as(doc: &Document, form: super::forms::Form) -> Result<(Do
     super::forms::apply_wording(&mut out, &super::forms::marks(doc), form)?;
     // Fill-ins: left-out text goes; open ones print as written and are reported.
     c.fields_open = super::fields::resolve_for_print(&mut out);
+    // Units of measure (M19): US only, metric only, or both.
+    super::units::apply(&mut out);
     Ok((out, c))
 }
 

@@ -346,6 +346,7 @@ fn fill_ins(app: &mut WordApp, ui: &mut Ui) {
     ui.separator();
     let mut action: Option<Value> = None;
     let mut need_action: Option<Value> = None;
+    let mut choice_action: Option<(&'static str, Value)> = None;
     let mut goto: Option<u64> = None;
     egui::ScrollArea::vertical().id_salt("spec_fill_ins").auto_shrink([false, false]).show(ui, |ui| {
         for f in &all {
@@ -396,31 +397,16 @@ fn fill_ins(app: &mut WordApp, ui: &mut Ui) {
                     });
             });
             ui.label(RichText::new(s("original")).small().color(t.text_dim));
-            let options: Vec<String> = f
-                .get("options")
-                .and_then(Value::as_array)
-                .map(|o| o.iter().filter_map(Value::as_str).map(str::to_string).collect())
-                .unwrap_or_default();
             match s("kind").as_str() {
                 "choice" | "optional" => {
-                    let current = match state.as_str() {
-                        "open" => tl!("Choose…").to_string(),
-                        "omitted" => tl!("(leave out)").to_string(),
-                        _ => s("value"),
-                    };
-                    craft_ui::ComboBox::from_id_salt(("spec_field", &id)).selected_text(current).width(ui.available_width() - 8.0).show_ui(
-                        ui,
-                        |ui| {
-                            for (i, o) in options.iter().enumerate() {
-                                if ui.selectable_label(s("value") == *o, o).clicked() {
-                                    action = Some(json!({"id": id, "option": i}));
-                                }
+                    if let Some(c) = super::choices::Choice::from_json(f) {
+                        let fill = app.speccraft.drafts.entry(id.clone()).or_default();
+                        egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| {
+                            if let Some(a) = super::choices::list(ui, &t, &c, fill) {
+                                choice_action = Some(a);
                             }
-                            if s("kind") == "optional" && ui.selectable_label(state == "omitted", tl!("(leave out)")).clicked() {
-                                action = Some(json!({"id": id, "omit": true}));
-                            }
-                        },
-                    );
+                        });
+                    }
                 }
                 _ => {
                     let draft = app.speccraft.drafts.entry(id.clone()).or_insert_with(|| if state == "open" { String::new() } else { s("value") });
@@ -435,6 +421,16 @@ fn fill_ins(app: &mut WordApp, ui: &mut Ui) {
             ui.add_space(6.0);
         }
     });
+    if let Some((cmd, params)) = choice_action {
+        if let Some(id) = params.get("id").and_then(Value::as_str)
+            && params.get("fill").is_some()
+        {
+            app.speccraft.drafts.remove(id);
+        }
+        if let Err(e) = app.run(cmd, params) {
+            app.status(e);
+        }
+    }
     if let Some(params) = need_action
         && let Err(e) = app.run("spec.fields.need", params)
     {

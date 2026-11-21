@@ -18,6 +18,7 @@ use crate::theme::{Tokens, regular, semibold};
 use crate::widgets::{big, big_toggle, group};
 
 pub(crate) mod checks;
+pub(crate) mod choices;
 pub(crate) mod library;
 pub(crate) mod marks;
 pub(crate) mod outline;
@@ -72,6 +73,10 @@ pub struct SpecUi {
     /// ahead anyway).
     pub(crate) publish_blocked: Option<&'static str>,
     /// The form the Printed view shows, and the form Publish and Project Manual write (M16).
+    /// The choice open on the page (M19): field id, where its list shows, and the frame it opened.
+    pub(crate) choice_popup: Option<(String, egui::Pos2, u64)>,
+    /// What is typed into a choice's blank on the page.
+    pub(crate) choice_fill: String,
     pub(crate) print_form: wordcraft_engine::cmd::spec::forms::Form,
     pub(crate) publish_form: wordcraft_engine::cmd::spec::forms::Form,
     /// `spec.short.list`, per revision; the short wording being typed (M16).
@@ -527,6 +532,14 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
         big(ui, app, "outdent", "Outdent", "spec.indent", json!({"by": -1}), false);
         big(ui, app, "numbering", "No\nNumber", "spec.noNumber", json!({}), false);
         big(ui, app, "multilevel", "Fix\nHierarchy", "spec.fixHierarchy", json!({}), false);
+        // Units of measure that print (M19): both, US only, metric only; a click goes to the next.
+        let units = wordcraft_engine::cmd::spec::units::units(&app.session.doc);
+        let (label, next) = match units {
+            wordcraft_engine::cmd::spec::units::Units::Both => ("Units:\nUS + Metric", "us"),
+            wordcraft_engine::cmd::spec::units::Units::Us => ("Units:\nUS", "metric"),
+            wordcraft_engine::cmd::spec::units::Units::Metric => ("Units:\nMetric", "both"),
+        };
+        big(ui, app, "ruler", label, "spec.units", json!({"value": next}), false);
         let auto = wordcraft_engine::cmd::spec::paragraphs::auto_select(&app.session.doc);
         big(ui, app, "check", "Auto-Select\nNew", "spec.autoSelectNew", json!({"value": !auto}), auto);
     });

@@ -26,6 +26,7 @@ pub mod project;
 pub mod quality;
 pub mod rules;
 pub mod sections;
+pub mod units;
 pub mod update;
 
 const LOC: &str = "Specs › Items";
@@ -59,6 +60,7 @@ pub fn specs() -> Vec<CommandSpec> {
     v.extend(quality::specs());
     v.extend(rules::specs());
     v.extend(update::specs());
+    v.extend(units::specs());
     v
 }
 
