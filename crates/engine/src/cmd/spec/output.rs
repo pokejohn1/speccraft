@@ -4,13 +4,18 @@
 //! The live document is never touched: [`printable_copy`] clones it, keeps what prints (the rule
 //! of [`sections::printable`]) and the PDF is written from the copy through WordCraft's own PDF
 //! export and safe file write. Numbering comes from the paragraph styles, so it closes up by itself.
+//!
+//! Word export (M13) writes the same copy as a `.docx` without Speccraft's own markings: the
+//! content controls around spec paragraphs and fill-ins are taken off (their text stays) and the
+//! `Speccraft.*` document properties are dropped, so the file is a plain Word document.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use wordcraft_doc::{Block, Document, Paragraph};
+use wordcraft_doc::para::OBJ;
+use wordcraft_doc::{Block, Document, Paragraph, StoryRef};
 
 use super::sections::{self, Kind};
 use crate::{CmdError, CmdResult, CommandSpec, Session};
@@ -21,6 +26,9 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("spec.exportPdf", "Export Printable PDF", LOC, export_pdf)
             .params(r#"{"path"?: string (a .pdf file; default: the section file's own path with .pdf), "project"?: string (a .speccraft file whose values fill placeholders; default: the only one in the section's folder)}"#)
+            .pure(),
+        CommandSpec::new("spec.exportDocx", "Export to Word", LOC, export_docx)
+            .params(r#"{"path"?: string (a .docx file; default: "<section> (issued).docx" beside the section file), "project"?: string (as for spec.exportPdf)}"#)
             .pure(),
     ]
 }
@@ -125,19 +133,23 @@ pub fn printable_copy(doc: &Document) -> Result<(Document, Counts), CmdError> {
     Ok((out, c))
 }
 
-/// The file to write: `path`, else the section file's own path as .pdf. Only a .pdf file.
-fn target(s: &Session, v: &Value) -> Result<PathBuf, CmdError> {
+/// The file to write: `path`, else beside the section file (`.pdf`: the same name; `.docx`:
+/// "<name> (issued).docx", never the section file). Only a file with extension `ext`.
+fn target(s: &Session, v: &Value, ext: &str) -> Result<PathBuf, CmdError> {
     let path = match v.get("path") {
         None | Some(Value::Null) => s
             .path
             .as_ref()
-            .map(|p| p.with_extension("pdf"))
-            .ok_or_else(|| CmdError::Params("this document has not been saved yet: give `path` (a .pdf file to write)".into()))?,
+            .map(|p| match ext {
+                "pdf" => p.with_extension("pdf"),
+                _ => p.with_file_name(format!("{} (issued).{ext}", p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())),
+            })
+            .ok_or_else(|| CmdError::Params(format!("this document has not been saved yet: give `path` (a .{ext} file to write)")))?,
         Some(Value::String(p)) => PathBuf::from(p),
         Some(_) => return Err(CmdError::Params("`path` must be a string".into())),
     };
-    if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) || path.file_stem().is_none() {
-        return Err(CmdError::Params(format!("`path` must name a .pdf file (refusing to write {:?})", path.display().to_string())));
+    if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext)) || path.file_stem().is_none() {
+        return Err(CmdError::Params(format!("`path` must name a .{ext} file (refusing to write {:?})", path.display().to_string())));
     }
     if s.path.as_ref() == Some(&path) {
         return Err(CmdError::Params("`path` is the section file itself".into()));
@@ -145,14 +157,21 @@ fn target(s: &Session, v: &Value) -> Result<PathBuf, CmdError> {
     Ok(path)
 }
 
-/// Write a PDF of the paragraphs that print. Changes nothing in the document.
-fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
-    let path = target(s, v)?;
+/// The issued copy of a section: what prints, placeholders filled from the project, and what to
+/// warn about. Changes nothing in the document.
+pub struct Issued {
+    pub copy: Document,
+    pub counts: Counts,
+    pub filled: usize,
+    pub warnings: Vec<String>,
+}
+
+pub fn issued_copy(s: &Session, project: Option<&str>) -> Result<Issued, CmdError> {
     let (mut copy, mut c) = printable_copy(&s.doc)?;
     let mut warnings = Vec::new();
     // Placeholders such as <Insert Project Name> take the project's values, in the copy only.
     let mut filled = 0;
-    if let Some(project) = super::project::project_for(s.path.as_deref(), crate::p::str(v, "project"))? {
+    if let Some(project) = super::project::project_for(s.path.as_deref(), project)? {
         match super::project::load(&project) {
             Ok(f) => {
                 let values = super::project::placeholder_values(&f);
@@ -168,7 +187,7 @@ fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
         }
     }
     if c.printed == 0 {
-        warnings.push("nothing is switched on: the PDF is a blank page".to_string());
+        warnings.push("nothing is switched on: the copy is a blank page".to_string());
     }
     if c.unmanaged > 0 {
         warnings.push(format!(
@@ -184,24 +203,83 @@ fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
     if c.breaks_kept > 0 {
         warnings.push(format!("{} section break(s) kept on an empty paragraph", c.breaks_kept));
     }
+    Ok(Issued { copy, counts: c, filled, warnings })
+}
+
+/// Take Speccraft's own markings off a copy so it is a plain Word document: the content controls
+/// around spec paragraphs and fill-ins go (their text stays), and so do the `Speccraft.*`
+/// properties. Returns how many controls were taken off.
+pub fn strip_markings(doc: &mut Document) -> usize {
+    let ours = |tag: &str| tag.starts_with(super::TAG_PREFIX) || tag.starts_with(super::fields::FIELD_PREFIX);
+    let w = OBJ.len_utf8();
+    let mut n = 0;
+    // The last one first, so an inner fill-in goes before the paragraph around it; positions
+    // are read afresh each time.
+    while n < 200_000 {
+        let Some(r) = doc.control_ranges(StoryRef::Body).into_iter().filter(|r| ours(&r.control.tag)).max_by(|a, b| a.start.cmp(&b.start)) else {
+            break;
+        };
+        if r.control.showing_placeholder && doc.delete_range(&r.content_start(), &r.end).is_err() {
+            break;
+        }
+        let end = doc.control_at(&r.content_start()).map(|x| x.end).unwrap_or(r.end.clone());
+        let gone = doc.para_mut(end.story, &end.path).and_then(|p| p.delete(end.off, end.off + w)).is_ok()
+            && doc.para_mut(r.start.story, &r.start.path).and_then(|p| p.delete(r.start.off, r.start.off + w)).is_ok();
+        if !gone {
+            break;
+        }
+        n += 1;
+    }
+    doc.custom_props.retain(|p| !p.name.starts_with("Speccraft."));
+    n
+}
+
+pub fn page_count(doc: &Document) -> usize {
     let opts = wordcraft_layout::LayoutOptions { view: wordcraft_layout::ViewMode::Print, ..Default::default() };
-    let pages = wordcraft_layout::layout(&copy, &mut wordcraft_layout::LayoutCache::new(), &opts).pages.len();
-    let bytes = crate::io::save_bytes_opts("printable.pdf", &copy, &crate::io::ExportOptions::default()).map_err(CmdError::Failed)?;
-    let shown = path.to_string_lossy().to_string();
-    crate::io::write_file(&shown, &bytes).map_err(CmdError::Failed)?;
-    Ok(json!({
-        "path": shown,
+    wordcraft_layout::layout(doc, &mut wordcraft_layout::LayoutCache::new(), &opts).pages.len()
+}
+
+fn report(path: &str, bytes: usize, pages: usize, i: &Issued) -> Value {
+    let c = &i.counts;
+    json!({
+        "path": path,
         "pages": pages,
-        "bytes": bytes.len(),
+        "bytes": bytes,
         "printed": c.printed,
         "omitted": c.omitted,
         "notes": c.notes,
         "unmanaged": c.unmanaged,
         "sectionBreaksMoved": c.breaks_moved,
-        "placeholdersFilled": filled,
+        "placeholdersFilled": i.filled,
         "fieldsOpen": c.fields_open.len(),
-        "warnings": warnings,
-    }))
+        "warnings": i.warnings,
+    })
+}
+
+/// Write a PDF of the paragraphs that print. Changes nothing in the document.
+fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
+    let path = target(s, v, "pdf")?;
+    let issued = issued_copy(s, crate::p::str(v, "project"))?;
+    let pages = page_count(&issued.copy);
+    let bytes = crate::io::save_bytes_opts("printable.pdf", &issued.copy, &crate::io::ExportOptions::default()).map_err(CmdError::Failed)?;
+    let shown = path.to_string_lossy().to_string();
+    crate::io::write_file(&shown, &bytes).map_err(CmdError::Failed)?;
+    Ok(report(&shown, bytes.len(), pages, &issued))
+}
+
+/// Write a Word document of the paragraphs that print, without Speccraft's markings (M13).
+/// Changes nothing in the document.
+fn export_docx(s: &mut Session, v: &Value) -> CmdResult {
+    let path = target(s, v, "docx")?;
+    let mut issued = issued_copy(s, crate::p::str(v, "project"))?;
+    let removed = strip_markings(&mut issued.copy);
+    let pages = page_count(&issued.copy);
+    let bytes = crate::io::save_bytes_opts("issued.docx", &issued.copy, &crate::io::ExportOptions::default()).map_err(CmdError::Failed)?;
+    let shown = path.to_string_lossy().to_string();
+    crate::io::write_file(&shown, &bytes).map_err(CmdError::Failed)?;
+    let mut r = report(&shown, bytes.len(), pages, &issued);
+    r["controlsRemoved"] = json!(removed);
+    Ok(r)
 }
 
 #[cfg(test)]
@@ -359,6 +437,41 @@ mod tests {
         assert_eq!(r["warnings"], json!([]));
         assert_eq!((s.doc.clone(), s.sel.clone(), s.undo_labels(), s.can_redo()), before, "document, selection and undo unchanged");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn word_export_is_a_plain_document_of_what_prints() {
+        let mut s = imported();
+        // A fill-in in a printing paragraph, chosen.
+        let e = crate::cmd::spec::sections::outline(&s.doc).into_iter().find(|e| e.id == "p0006").unwrap();
+        crate::cmd::spec::edits::set_paragraph_text(&mut s.doc, &e, "Interior [gypsum] [cement] board.").unwrap();
+        run(&mut s, "spec.activate", json!({"id": "p0006"}));
+        crate::cmd::spec::fields::detect(&mut s.doc).unwrap();
+        let f = run(&mut s, "spec.fields.list", json!({}));
+        run(&mut s, "spec.fields.set", json!({"id": f["fields"][0]["id"], "value": "gypsum"}));
+        let before = (s.doc.clone(), s.sel.clone());
+        let file = temp("09 2900.docx");
+        s.path = Some(file.clone());
+        let r = run(&mut s, "spec.exportDocx", json!({}));
+        let out = file.with_file_name("09 2900 (issued).docx");
+        assert_eq!(r["path"], out.to_string_lossy().to_string(), "never the section file itself");
+        assert!(r["controlsRemoved"].as_u64().unwrap() >= 6, "{r}");
+        assert_eq!((s.doc.clone(), s.sel.clone()), before, "the section is unchanged");
+        // Opened again: no controls, no Speccraft properties, the printed text and styles.
+        let back = crate::io::open_bytes("x.docx", &std::fs::read(&out).unwrap()).unwrap();
+        assert!(back.control_ranges(wordcraft_doc::StoryRef::Body).is_empty());
+        assert!(back.custom_props.iter().all(|p| !p.name.starts_with("Speccraft.")), "{:?}", back.custom_props);
+        let (printed, _) = printable_copy(&s.doc).unwrap();
+        let mut want = texts(&printed);
+        if let Some(t) = want.iter_mut().find(|t| t.contains("Interior")) {
+            *t = "Interior gypsum board.".into();
+        }
+        assert_eq!(texts(&back), want);
+        let styles: Vec<Option<String>> = back.body.iter().filter_map(|b| b.as_para()).map(|p| p.props.style.clone()).collect();
+        assert_eq!(styles, ["SCT", "PRT", "ART", "PR1", "PR2", "EOS"].map(|x| Some(x.to_string())));
+        assert!(s.run("spec.exportDocx", &json!({"path": file.to_string_lossy()})).is_err(), "not over the section");
+        assert!(s.run("spec.exportDocx", &json!({"path": temp("x.pdf").to_string_lossy()})).is_err());
+        let _ = std::fs::remove_file(&out);
     }
 
     #[test]

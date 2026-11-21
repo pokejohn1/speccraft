@@ -79,7 +79,7 @@ pub fn specs() -> Vec<CommandSpec> {
             .pure(),
         CommandSpec::new("spec.project.validate", "Check Project", LOC, validate).params(r#"{"path": string (the project's .speccraft file)}"#).pure(),
         CommandSpec::new("spec.project.publish", "Publish Project Sections", LOC, publish)
-            .params(r#"{"path": string (the project's .speccraft file), "folder"?: string (default: Published beside the project file), "force"?: bool (publish even when Check Project finds errors)}"#)
+            .params(r#"{"path": string (the project's .speccraft file), "folder"?: string (default: Published beside the project file), "force"?: bool (publish even when Check Project finds errors), "format"?: "pdf" (default), "docx" or "both"}"#)
             .pure(),
         CommandSpec::new("spec.project.acknowledge", "Acknowledge Finding", LOC, acknowledge)
             .params(r#"{"path": string (the project's .speccraft file), "key": string (a warning or notice's key from spec.project.validate), "note"?: string, "undo"?: bool}"#)
@@ -1075,6 +1075,12 @@ fn publish(s: &mut Session, v: &Value) -> CmdResult {
     if errors > 0 && !p::bool(v, "force").unwrap_or(false) {
         return Err(CmdError::Failed(format!("Check Project found {errors} errors: fix them first, or publish with force")));
     }
+    let formats: &[&str] = match p::str(v, "format").unwrap_or("pdf") {
+        "pdf" => &["pdf"],
+        "docx" => &["docx"],
+        "both" => &["pdf", "docx"],
+        other => return Err(CmdError::Params(format!("`format` must be \"pdf\", \"docx\" or \"both\", not {other:?}"))),
+    };
     let f = load(&path)?;
     let dir = folder(&path);
     let out_dir = match p::str(v, "folder") {
@@ -1088,16 +1094,29 @@ fn publish(s: &mut Session, v: &Value) -> CmdResult {
     let mut done = Vec::new();
     for s in f.sections.iter().filter(|s| s.included) {
         let full = dir.join(&s.file);
-        let pdf = out_dir.join(Path::new(&s.file).with_extension("pdf"));
-        let r = crate::io::read_document(&full).and_then(|b| crate::io::open_bytes(&s.file, &b)).map_err(CmdError::Failed).and_then(|doc| {
-            let mut sess = Session::new(doc);
-            sess.path = Some(full.clone());
-            sess.run("spec.exportPdf", &json!({"path": pdf.to_string_lossy(), "project": path.to_string_lossy()}))
-        });
-        done.push(match r {
-            Ok(x) => json!({"file": s.file, "pdf": pdf.to_string_lossy(), "pages": x["pages"], "warnings": x["warnings"]}),
-            Err(e) => json!({"file": s.file, "error": e.to_string()}),
-        });
+        let opened = crate::io::read_document(&full).and_then(|b| crate::io::open_bytes(&s.file, &b)).map_err(CmdError::Failed);
+        let mut row = json!({"file": s.file});
+        match opened {
+            Ok(doc) => {
+                let mut sess = Session::new(doc);
+                sess.path = Some(full.clone());
+                for ext in formats {
+                    // Word files go out under the section file's own name, in the Published folder.
+                    let out = out_dir.join(Path::new(&s.file).with_extension(ext));
+                    let cmd = if *ext == "pdf" { "spec.exportPdf" } else { "spec.exportDocx" };
+                    match sess.run(cmd, &json!({"path": out.to_string_lossy(), "project": path.to_string_lossy()})) {
+                        Ok(x) => {
+                            row[*ext] = json!(out.to_string_lossy());
+                            row["pages"] = x["pages"].clone();
+                            row["warnings"] = x["warnings"].clone();
+                        }
+                        Err(e) => row["error"] = json!(e.to_string()),
+                    }
+                }
+            }
+            Err(e) => row["error"] = json!(e.to_string()),
+        }
+        done.push(row);
     }
     let failed = done.iter().filter(|d| d.get("error").is_some()).count();
     let check = json!({"errors": errors, "warnings": checked["warnings"], "notices": checked["notices"]});
@@ -1339,6 +1358,13 @@ mod tests {
         assert_eq!(out["check"]["errors"], 0);
         let pdf = dir.join("project").join("Published").join("gypsum.pdf");
         assert!(std::fs::read(&pdf).unwrap().starts_with(b"%PDF"));
+        // Word too (M13): the same name, a plain document.
+        let out = run("spec.project.publish", json!({"path": path, "format": "both"}));
+        let docx = dir.join("project").join("Published").join("gypsum.docx");
+        assert_eq!(out["sections"][0]["docx"], docx.to_string_lossy().as_ref(), "{out}");
+        let back = crate::io::open_bytes("x.docx", &std::fs::read(&docx).unwrap()).unwrap();
+        assert!(back.custom_prop(ROLE_PROP).is_none());
+        assert!(fails("spec.project.publish", json!({"path": path, "format": "rtf"})).contains("format"));
 
         // The section's own spec.exportPdf finds the project beside it; the file keeps its placeholders.
         let g = dir.join("project").join("gypsum.docx");

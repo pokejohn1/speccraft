@@ -123,10 +123,10 @@ pub(crate) fn project_report(app: &mut WordApp, ui: &mut Ui, f: &Value, action: 
             let label = crate::i18n::fmt(tl!("Show {n} accepted"), &[("n", &acked.to_string())]);
             ui.checkbox(&mut app.speccraft.show_accepted, label);
         }
-        if app.speccraft.publish_blocked
+        if let Some(which) = app.speccraft.publish_blocked
             && ui.small_button(tl!("Publish Anyway")).on_hover_text(tl!("Publish although Check Project found errors")).clicked()
         {
-            *action = Some(("ui.spec.publish", json!({"force": true})));
+            *action = Some((which, json!({"force": true})));
         }
     });
     let all = f.get("findings").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -221,10 +221,17 @@ mod tests {
         // An error stops Publish; the report offers Publish Anyway, which publishes.
         a.run("spec.project.requires", json!({"path": path, "file": "092900.docx", "requires": ["07 9200"]})).unwrap();
         assert!(a.run("ui.spec.publish", json!({})).is_err());
-        assert!(a.speccraft.publish_blocked);
+        assert_eq!(a.speccraft.publish_blocked, Some("ui.spec.publish"));
         assert_eq!(a.speccraft.findings.as_ref().unwrap()["errors"], 1);
         a.run("ui.spec.publish", json!({"force": true})).unwrap();
-        assert!(!a.speccraft.publish_blocked);
+        assert_eq!(a.speccraft.publish_blocked, None);
+        // The manual stops the same way, and goes ahead when forced; Word as well as PDF.
+        assert!(a.run("ui.spec.manual", json!({})).is_err());
+        assert_eq!(a.speccraft.publish_blocked, Some("ui.spec.manual"));
+        a.run("ui.spec.publishFormat", json!({"format": "both"})).unwrap();
+        let r = a.run("ui.spec.manual", json!({"force": true})).unwrap();
+        assert!(r["files"]["pdf"].is_string() && r["files"]["docx"].is_string(), "{r}");
+        assert!(a.run("ui.spec.publishFormat", json!({"format": "rtf"})).is_err());
 
         // Accepting the warning stops it counting.
         let check = a.run("ui.spec.check", json!({})).unwrap();

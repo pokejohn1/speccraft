@@ -65,8 +65,11 @@ pub struct SpecUi {
     pub(crate) check_cache: Option<((u64, u64), Value)>,
     /// Check Project's accepted findings are listed too.
     pub(crate) show_accepted: bool,
-    /// The last Publish stopped at errors (the report offers Publish Anyway).
-    pub(crate) publish_blocked: bool,
+    /// The last Publish or Project Manual stopped at errors: which (the report offers to go
+    /// ahead anyway).
+    pub(crate) publish_blocked: Option<&'static str>,
+    /// What Publish and Project Manual write: `pdf` (default), `docx` or `both` (M13).
+    pub(crate) publish_format: String,
     /// The Updates view (M11).
     pub(crate) update: updates::UpdateUi,
     /// The Master Library pane (M9).
@@ -179,28 +182,47 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
         "ui.spec.check" => {
             let path = project_path(app)?;
             let r = app.run("spec.project.validate", json!({"path": path}))?;
-            app.speccraft.publish_blocked = false;
+            app.speccraft.publish_blocked = None;
             app.speccraft.findings = Some(r.clone());
             app.speccraft.pane_open = true;
             Ok(r)
         }
-        "ui.spec.publish" => {
+        "ui.spec.publishFormat" => {
+            let f = s("format").filter(|f| matches!(f.as_str(), "pdf" | "docx" | "both")).ok_or("`format` must be \"pdf\", \"docx\" or \"both\"")?;
+            app.speccraft.publish_format = f.clone();
+            Ok(json!({"format": f}))
+        }
+        "ui.spec.publish" | "ui.spec.manual" => {
             let path = project_path(app)?;
             save_if_changed(app)?;
             let force = p.get("force").and_then(Value::as_bool).unwrap_or(false);
-            let r = match app.run("spec.project.publish", json!({"path": path, "force": force})) {
+            let format = s("format")
+                .unwrap_or_else(|| if app.speccraft.publish_format.is_empty() { "pdf".into() } else { app.speccraft.publish_format.clone() });
+            let (engine, which) =
+                if id == "ui.spec.manual" { ("spec.project.manual", "ui.spec.manual") } else { ("spec.project.publish", "ui.spec.publish") };
+            let r = match app.run(engine, json!({"path": path, "force": force, "format": format})) {
                 Ok(r) => r,
                 Err(e) => {
-                    // Stopped by errors: show them, with Publish Anyway beside them.
+                    // Stopped by errors: show them, with a way to go ahead anyway beside them.
                     if let Ok(check) = app.run("spec.project.validate", json!({"path": path})) {
-                        app.speccraft.publish_blocked = check.get("errors").and_then(Value::as_u64).unwrap_or(0) > 0;
+                        let errors = check.get("errors").and_then(Value::as_u64).unwrap_or(0) > 0;
+                        app.speccraft.publish_blocked = errors.then_some(which);
                         app.speccraft.findings = Some(check);
                         app.speccraft.pane_open = true;
                     }
                     return Err(e);
                 }
             };
-            app.speccraft.publish_blocked = false;
+            app.speccraft.publish_blocked = None;
+            if id == "ui.spec.manual" {
+                let pages = r.get("pages").and_then(Value::as_u64).unwrap_or(0).to_string();
+                let n = r.get("sections").and_then(Value::as_array).map_or(0, Vec::len).to_string();
+                app.status(crate::i18n::fmt(
+                    tl!("Project manual published: {n} sections, {pages} pages, in the Published folder"),
+                    &[("n", &n), ("pages", &pages)],
+                ));
+                return Ok(r);
+            }
             let n = r.get("sections").and_then(Value::as_array).map_or(0, Vec::len);
             let failed = r.get("failed").and_then(Value::as_u64).unwrap_or(0);
             let msg = if failed == 0 {
@@ -369,6 +391,7 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
             big(ui, app, "file", "Add\nSection…", "ui.spec.addSection", json!({}), false);
             big(ui, app, "checkErrors", "Check\nProject", "ui.spec.check", json!({}), false);
             big(ui, app, "export", "Publish\nProject", "ui.spec.publish", json!({}), false);
+            big(ui, app, "coverPage", "Project\nManual", "ui.spec.manual", json!({}), false);
         });
     });
     group(ui, "Section", None, app, |ui, app| {
@@ -384,6 +407,7 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
         big(ui, app, "compare", "Master\nUpdates", "ui.spec.outlinePane", json!({"value": true, "view": "updates"}), false);
         big(ui, app, "readMode", "Printed\nView", "ui.spec.outlinePane", json!({"value": true, "view": "printed"}), false);
         big(ui, app, "export", "Export\nPDF", "spec.exportPdf", json!({}), false);
+        big(ui, app, "saveAs", "Export\nWord", "spec.exportDocx", json!({}), false);
     });
     group(ui, "Edits", None, app, |ui, app| {
         big(ui, app, "plus", "Add\nParagraph", "spec.addParagraph", json!({}), false);
@@ -472,9 +496,25 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
         if ui.small_button(tl!("Check")).clicked() {
             let _ = app.run("ui.spec.check", json!({}));
         }
-        if ui.small_button(tl!("Publish")).clicked() {
+        if ui.small_button(tl!("Publish")).on_hover_text(tl!("Each included section as its own file")).clicked() {
             let _ = app.run("ui.spec.publish", json!({}));
         }
+        if ui.small_button(tl!("Manual")).on_hover_text(tl!("All included sections as one project manual, with a table of contents")).clicked() {
+            let _ = app.run("ui.spec.manual", json!({}));
+        }
+        let fmt = if app.speccraft.publish_format.is_empty() { "pdf".to_string() } else { app.speccraft.publish_format.clone() };
+        let label = |f: &str| match f {
+            "docx" => tl!("Word"),
+            "both" => tl!("PDF and Word"),
+            _ => tl!("PDF"),
+        };
+        craft_ui::ComboBox::from_id_salt("spec_publish_format").selected_text(label(&fmt)).show_ui(ui, |ui| {
+            for f in ["pdf", "docx", "both"] {
+                if ui.selectable_label(fmt == f, label(f)).clicked() {
+                    app.speccraft.publish_format = f.to_string();
+                }
+            }
+        });
     });
     ui.separator();
     let current = app.session.path.clone();
