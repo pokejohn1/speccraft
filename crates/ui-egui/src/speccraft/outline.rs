@@ -52,6 +52,8 @@ pub(crate) enum View {
     Checks,
     Updates,
     Printed,
+    /// Review comments (M25).
+    Comments,
 }
 
 /// Rendered pages of the printed copy, for one document revision.
@@ -107,6 +109,7 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
             (View::Checks, "Checks"),
             (View::Updates, "Updates"),
             (View::Printed, "Printed"),
+            (View::Comments, "Comments"),
         ] {
             if ui.selectable_label(app.speccraft.view == v, tl!(label)).clicked() {
                 app.speccraft.view = v;
@@ -128,6 +131,9 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     }
     if app.speccraft.view == View::Updates {
         return super::updates::view(app, ui);
+    }
+    if app.speccraft.view == View::Comments {
+        return super::comments_view::view(app, ui);
     }
     let o = outline(app);
     let items: Vec<Value> = o.get("items").and_then(Value::as_array).cloned().unwrap_or_default();

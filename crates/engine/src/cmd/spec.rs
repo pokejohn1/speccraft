@@ -15,6 +15,7 @@ use super::{controls, pos_json};
 use crate::{CmdError, CmdResult, CommandSpec, Selection, Session, p};
 
 pub mod attachments;
+pub mod comments;
 pub mod edits;
 pub mod fields;
 pub mod forms;
@@ -63,6 +64,7 @@ pub fn specs() -> Vec<CommandSpec> {
     v.extend(print::specs());
     v.extend(attachments::specs());
     v.extend(review::specs());
+    v.extend(comments::specs());
     v.extend(project::specs());
     v.extend(quality::specs());
     v.extend(rules::specs());

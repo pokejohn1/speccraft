@@ -19,6 +19,7 @@ use crate::widgets::{big, big_toggle, group};
 
 pub(crate) mod checks;
 pub(crate) mod choices;
+pub(crate) mod comments_view;
 pub(crate) mod library;
 pub(crate) mod marks;
 pub(crate) mod outline;
@@ -86,6 +87,9 @@ pub struct SpecUi {
     pub(crate) show_print_options: bool,
     /// The section a PDF is being attached to (M23).
     pub(crate) attach_to: Option<String>,
+    /// Comments view (M25): priorities hidden, and whether resolved and closed ones are hidden.
+    pub(crate) comment_hidden: std::collections::BTreeSet<String>,
+    pub(crate) comment_open_only: bool,
     pub(crate) standard_drafts: std::collections::HashMap<String, (String, String)>,
     pub(crate) print_form: wordcraft_engine::cmd::spec::forms::Form,
     pub(crate) publish_form: wordcraft_engine::cmd::spec::forms::Form,
@@ -159,6 +163,7 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
                     "rules" => outline::View::Rules,
                     "checks" => outline::View::Checks,
                     "updates" => outline::View::Updates,
+                    "comments" => outline::View::Comments,
                     _ => outline::View::Outline,
                 };
             }
@@ -183,6 +188,18 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
             } else {
                 app.run(engine, json!({"value": value}))
             }
+        }
+        "ui.spec.commentsReport" => {
+            if let Err(e) = save_if_changed(app) {
+                app.status(e);
+            }
+            let path = project_path(app)?;
+            let format = s("format").unwrap_or_else(|| "docx".into());
+            let r = app.run("spec.project.comments", json!({"path": path, "format": format}))?;
+            let n = r.get("count").and_then(Value::as_u64).unwrap_or(0).to_string();
+            let file = r.get("path").and_then(Value::as_str).unwrap_or("").to_string();
+            app.status(crate::i18n::fmt(tl!("Comments report: {n} comments, {file}"), &[("n", &n), ("file", &file)]));
+            Ok(r)
         }
         "ui.spec.printOptions" => {
             app.speccraft.pane_open = true;
@@ -580,6 +597,7 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
         let tracking = app.session.doc.settings.track_changes;
         big(ui, app, "trackChanges", "Track\nChanges", "spec.review.track", json!({"value": !tracking}), tracking);
         big(ui, app, "acceptAll", "New Review\nRound", "spec.review.newRound", json!({}), false);
+        big(ui, app, "newComment", "Review\nComments", "ui.spec.outlinePane", json!({"value": true, "view": "comments"}), false);
         big(ui, app, "export", "Export\nPDF", "spec.exportPdf", json!({}), false);
         big(ui, app, "link", "Go to\nSection", "ui.spec.followReference", json!({}), false);
         big(ui, app, "saveAs", "Export\nWord", "spec.exportDocx", json!({}), false);
