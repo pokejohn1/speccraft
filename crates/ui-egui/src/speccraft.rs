@@ -576,6 +576,10 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
         big(ui, app, "checkErrors", "Check\nSection", "ui.spec.outlinePane", json!({"value": true, "view": "checks"}), false);
         big(ui, app, "compare", "Master\nUpdates", "ui.spec.outlinePane", json!({"value": true, "view": "updates"}), false);
         big(ui, app, "readMode", "Printed\nView", "ui.spec.outlinePane", json!({"value": true, "view": "printed"}), false);
+        // Review rounds (M24).
+        let tracking = app.session.doc.settings.track_changes;
+        big(ui, app, "trackChanges", "Track\nChanges", "spec.review.track", json!({"value": !tracking}), tracking);
+        big(ui, app, "acceptAll", "New Review\nRound", "spec.review.newRound", json!({}), false);
         big(ui, app, "export", "Export\nPDF", "spec.exportPdf", json!({}), false);
         big(ui, app, "link", "Go to\nSection", "ui.spec.followReference", json!({}), false);
         big(ui, app, "saveAs", "Export\nWord", "spec.exportDocx", json!({}), false);

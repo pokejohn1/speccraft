@@ -399,6 +399,7 @@ fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
     // Each part's attached PDFs (M23), for the PDF.
     let mut attached: Vec<Vec<std::sync::Arc<Vec<u8>>>> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+    let mut markup = false;
     let division = p::str(v, "division").map(project::number_key_prefix);
     for sec in f.sections.iter().filter(|x| x.included && division.as_ref().is_none_or(|d| number_key(&x.number).starts_with(d.as_str()))) {
         let full = dir.join(&sec.file);
@@ -414,6 +415,7 @@ fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
                 let pages = output::page_count(&i.copy);
                 let rows = i.attachments.iter().map(|(a, _)| (a.name(), a.title.clone(), a.pages)).collect();
                 attached.push(i.attachments.iter().map(|(_, b)| b.clone()).collect());
+                markup |= i.markup;
                 warnings.extend(i.warnings.iter().filter(|w| w.starts_with("attachment ")).cloned());
                 parts.push(Part { number: sec.number.clone(), title: sec.title.clone(), file: sec.file.clone(), pages, doc: i.copy, attached: rows });
             }
@@ -461,7 +463,7 @@ fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
     for ext in formats {
         let file = out_dir.join(format!("{name}.{ext}"));
         let bytes = if *ext == "pdf" {
-            super::attachments::pdf_with(&manual, inserts.clone())?
+            super::attachments::pdf_with(&manual, inserts.clone(), markup)?
         } else {
             if !inserts.is_empty() {
                 warnings.push("the Word manual has no attached PDFs: they go only into the PDF".into());

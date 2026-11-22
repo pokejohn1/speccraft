@@ -168,15 +168,17 @@ pub fn read_for(project_file: &Path, f: &ProjectFile, section: &str, warnings: &
         .collect()
 }
 
-/// A PDF of `doc` with other PDFs' pages put in (after the given number of `doc`'s pages).
-pub fn pdf_with(doc: &Document, inserts: Vec<wordcraft_pdf::PdfInsert>) -> Result<Vec<u8>, CmdError> {
+/// A PDF of `doc` with other PDFs' pages put in (after the given number of `doc`'s pages); with
+/// `markup`, tracked changes show (M24).
+pub fn pdf_with(doc: &Document, inserts: Vec<wordcraft_pdf::PdfInsert>, markup: bool) -> Result<Vec<u8>, CmdError> {
+    let export = crate::io::ExportOptions { markup, ..Default::default() };
     if inserts.is_empty() {
-        return crate::io::save_bytes_opts("printable.pdf", doc, &crate::io::ExportOptions::default()).map_err(CmdError::Failed);
+        return crate::io::save_bytes_opts("printable.pdf", doc, &export).map_err(CmdError::Failed);
     }
     // As the ordinary PDF save does: fields as Word fills them in as it prints.
     let out = crate::cmd::references::output_fields(doc);
     let doc = out.as_ref().unwrap_or(doc);
-    let opts = wordcraft_pdf::PdfOptions { inserts, ..crate::strict::pdf_options(&crate::io::ExportOptions::default()) };
+    let opts = wordcraft_pdf::PdfOptions { inserts, ..crate::strict::pdf_options(&export) };
     wordcraft_pdf::export(doc, &opts).map_err(|e| CmdError::Failed(e.to_string()))
 }
 

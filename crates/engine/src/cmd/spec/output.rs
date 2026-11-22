@@ -190,6 +190,8 @@ pub struct Issued {
     pub attachments: Vec<(super::attachments::Attachment, std::sync::Arc<Vec<u8>>)>,
     /// Where the manual puts them: "after" the section or at the "end".
     pub attachments_at: String,
+    /// Printed with review markup (M24).
+    pub markup: bool,
 }
 
 pub fn issued_copy(s: &Session, project: Option<&str>) -> Result<Issued, CmdError> {
@@ -242,6 +244,11 @@ pub fn issued_copy_with(s: &Session, project: Option<&str>, form: super::forms::
         }
     }
     super::print::apply(&mut copy, &opts, &number);
+    // Review markup (M24): tracked wording changes, and a bar by paragraphs switched on this round.
+    let markup = opts.markup == "all" || (opts.markup == "tracking" && s.doc.settings.track_changes);
+    if markup && let Some((on, _)) = super::review::switched(&source.doc) {
+        super::review::bar_switched_on(&mut copy, &on);
+    }
     let mut attachments = Vec::new();
     if let (Some(f), Some(file), Some(pp)) = (&loaded, file.as_deref(), super::project::project_for(s.path.as_deref(), project)?)
         && opts.attachments != "none"
@@ -265,7 +272,7 @@ pub fn issued_copy_with(s: &Session, project: Option<&str>, form: super::forms::
     if c.breaks_kept > 0 {
         warnings.push(format!("{} section break(s) kept on an empty paragraph", c.breaks_kept));
     }
-    Ok(Issued { copy, counts: c, filled, warnings, attachments, attachments_at: opts.attachments.clone() })
+    Ok(Issued { copy, counts: c, filled, warnings, attachments, attachments_at: opts.attachments.clone(), markup })
 }
 
 /// Take Speccraft's own markings off a copy so it is a plain Word document: the content controls
@@ -332,7 +339,7 @@ fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
     let inserts: Vec<wordcraft_pdf::PdfInsert> =
         issued.attachments.iter().map(|(_, b)| wordcraft_pdf::PdfInsert { after: usize::MAX, pdf: b.clone() }).collect();
     let attached: usize = issued.attachments.iter().map(|(a, _)| a.pages).sum();
-    let bytes = super::attachments::pdf_with(&issued.copy, inserts)?;
+    let bytes = super::attachments::pdf_with(&issued.copy, inserts, issued.markup)?;
     let shown = path.to_string_lossy().to_string();
     crate::io::write_file(&shown, &bytes).map_err(CmdError::Failed)?;
     let mut r = report(&shown, bytes.len(), pages, &issued);

@@ -32,6 +32,8 @@ pub(crate) struct Marked {
     pub origin: Origin,
     /// What the section's rules say about it now: a recommendation not followed, or a conflict.
     pub advice: Option<Standing>,
+    /// Switched on or off since the review round began (M24).
+    pub switched: bool,
     pub pieces: Vec<(usize, wordcraft_geom::Rect)>,
 }
 
@@ -104,6 +106,8 @@ pub(crate) fn marked(app: &mut WordApp, layout: &Arc<DocLayout>) -> Arc<Vec<Mark
         }
     }
     let origin_of: std::collections::HashMap<String, Origin> = origins.into_iter().map(|(e, o)| (e.id, o)).collect();
+    let switched: std::collections::HashSet<String> =
+        wordcraft_engine::cmd::spec::review::switched(doc).map(|(on, off)| on.into_iter().chain(off).collect()).unwrap_or_default();
     let items: Vec<Marked> = sections::states(doc)
         .into_iter()
         .enumerate()
@@ -111,7 +115,8 @@ pub(crate) fn marked(app: &mut WordApp, layout: &Arc<DocLayout>) -> Arc<Vec<Mark
             let pieces = layout.selection_rects(doc, &e.range.start, &e.range.end, hint);
             let origin = origin_of.get(&e.id).copied().unwrap_or(Origin::Master);
             let advice = advice.get(&e.id).copied();
-            Marked { id: e.id, seq, state, linked: e.linked, origin, advice, pieces }
+            let switched = switched.contains(&e.id);
+            Marked { id: e.id, seq, state, linked: e.linked, origin, advice, switched, pieces }
         })
         .collect();
     let marked_fields: Vec<MarkedField> = fields::fields(doc)
@@ -279,6 +284,12 @@ pub(crate) fn paint(app: &mut WordApp, ui: &mut Ui, painter: &Painter, rects: &[
                 && m.state != State::Overridden
             {
                 painter.text(pos2(mark.min.x - 2.0, mark.center().y), egui::Align2::RIGHT_CENTER, tag, font, color);
+            }
+            // Switched on or off this review round (M24): a blue bar left of the column.
+            if m.switched {
+                let x = mark.min.x - (16.0 * scale).clamp(12.0, 28.0);
+                let bar = Rect::from_min_max(pos2(x, area.min.y), pos2(x + (2.0 * scale).clamp(2.0, 3.0), area.max.y.max(mark.max.y)));
+                painter.rect_filled(bar, 0.0, t.blue);
             }
             let resp = ui.interact(mark.expand(1.0), ui.scope_id().with(("spec_mark", &m.id)), Sense::click());
             let resp = resp.on_hover_text(tl!(describe(m.state)));

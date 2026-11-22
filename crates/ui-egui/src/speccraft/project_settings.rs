@@ -254,6 +254,7 @@ fn print_options(app: &mut WordApp, ui: &mut Ui, info: &Value) {
                 &[("file", "The section file's"), ("number", "Number"), ("numberTitle", "Number and title")],
             );
             choose(ui, &print, c, "pageNumbers", "Manual page numbers", &[("restart", "From 1 in each section"), ("continue", "Running on")]);
+            choose(ui, &print, c, "markup", "Review markup", &[("none", "None"), ("all", "All sections"), ("tracking", "Sections tracking changes")]);
             choose(
                 ui,
                 &print,
