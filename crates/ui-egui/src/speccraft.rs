@@ -84,6 +84,8 @@ pub struct SpecUi {
     pub(crate) standards: Option<Value>,
     /// Print Options opens in the Sections pane next time it draws (Specs › Print Options).
     pub(crate) show_print_options: bool,
+    /// The section a PDF is being attached to (M23).
+    pub(crate) attach_to: Option<String>,
     pub(crate) standard_drafts: std::collections::HashMap<String, (String, String)>,
     pub(crate) print_form: wordcraft_engine::cmd::spec::forms::Form,
     pub(crate) publish_form: wordcraft_engine::cmd::spec::forms::Form,
@@ -121,6 +123,8 @@ enum Pick {
     OpenProject,
     NewProject,
     AddMaster,
+    /// A PDF to attach to the section in `SpecUi::attach_to` (M23).
+    AttachPdf,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -339,6 +343,18 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
             app.status(msg);
             Ok(r)
         }
+        "ui.spec.attach" => {
+            let file = s("file").ok_or("`file` must name a section file of the project")?;
+            app.speccraft.attach_to = Some(file);
+            ask(app, Pick::AttachPdf)
+        }
+        "ui.spec.detach" => {
+            let path = project_path(app)?;
+            let file = s("file").ok_or("`file` must name an attachment")?;
+            let r = app.run("spec.project.detach", json!({"path": path, "file": file}))?;
+            app.speccraft.info = Some(app.run("spec.project.info", json!({"path": path}))?);
+            Ok(r)
+        }
         "ui.spec.include" | "ui.spec.removeSection" | "ui.spec.move" => {
             let path = project_path(app)?;
             let file = s("file").ok_or("`file` must name a section file of the project")?;
@@ -372,6 +388,7 @@ fn ask(app: &mut WordApp, pick: Pick) -> Result<Value, String> {
         Pick::OpenProject => FileDialogRequest::Open { purpose: "speccraft".into() },
         Pick::AddMaster => FileDialogRequest::Open { purpose: "document".into() },
         Pick::NewProject => FileDialogRequest::Save { name: "Project.speccraft".into(), dir: None },
+        Pick::AttachPdf => FileDialogRequest::Open { purpose: "pdf".into() },
     };
     app.speccraft.pane_open = true;
     app.dialog_pick = None;
@@ -393,10 +410,22 @@ fn poll(app: &mut WordApp) {
         Pick::OpenProject => open_project(app, PathBuf::from(path)),
         Pick::NewProject => new_project(app, PathBuf::from(path), None),
         Pick::AddMaster => add_section(app, &path),
+        Pick::AttachPdf => attach(app, &path),
     };
     if let Err(e) = r {
         app.status(e);
     }
+}
+
+/// Attach the picked PDF to the section chosen before (M23).
+fn attach(app: &mut WordApp, pdf: &str) -> Result<Value, String> {
+    let path = project_path(app)?;
+    let section = app.speccraft.attach_to.take().ok_or("choose the section to attach to first")?;
+    let r = app.run("spec.project.attach", json!({"path": path, "section": section, "source": pdf}))?;
+    app.speccraft.info = Some(app.run("spec.project.info", json!({"path": path}))?);
+    let name = r.get("name").and_then(Value::as_str).unwrap_or("");
+    app.status(crate::i18n::fmt(tl!("Attached as {name}"), &[("name", name)]));
+    Ok(r)
 }
 
 fn open_project(app: &mut WordApp, path: PathBuf) -> Result<Value, String> {
@@ -577,6 +606,26 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
 // The Sections pane
 
 /// A section row of the pane, from `spec.project.info`.
+/// The attachments of section file `file`, as "087100-ATT1 - Title" (M23).
+fn attachments_of(info: &Value, file: &str) -> Vec<String> {
+    info.get("attachments")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter(|x| x.get("section").and_then(Value::as_str) == Some(file))
+                .map(|x| {
+                    let f = x.get("file").and_then(Value::as_str).unwrap_or("");
+                    let name = Path::new(f).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    match x.get("title").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+                        Some(t) => format!("{name} - {t}"),
+                        None => name,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 struct Row {
     file: String,
     number: String,
@@ -703,7 +752,26 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
             } else if !r.included {
                 text = text.color(t.text_disabled).strikethrough();
             }
-            let resp = ui.add(egui::Button::selectable(shown, text).frame_when_inactive(false)).on_hover_text(&r.file);
+            let attached = attachments_of(&info, &r.file);
+            if !attached.is_empty() {
+                text = RichText::new(format!("{}  {}  ", r.number, name)).font(regular(12.5));
+                if !r.exists {
+                    text = text.color(t.red);
+                } else if !r.included {
+                    text = text.color(t.text_disabled).strikethrough();
+                }
+            }
+            let resp = ui
+                .horizontal(|ui| {
+                    let resp = ui.add(egui::Button::selectable(shown, text).frame_when_inactive(false)).on_hover_text(&r.file);
+                    if !attached.is_empty() {
+                        let n = attached.len().to_string();
+                        ui.label(RichText::new(crate::i18n::fmt(tl!("+{n} PDF"), &[("n", &n)])).small().color(t.text_dim))
+                            .on_hover_text(attached.join("\n"));
+                    }
+                    resp
+                })
+                .inner;
             if resp.clicked() && r.exists {
                 action = Some(("ui.spec.openSection", json!({"file": r.file})));
             }
@@ -719,6 +787,11 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
                 }
                 if ui.button(tl!("Move Down")).clicked() {
                     action = Some(("ui.spec.move", json!({"file": r.file, "by": 1})));
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button(tl!("Attach PDF…")).on_hover_text(tl!("A form, appendix or schedule that issues with this section")).clicked() {
+                    action = Some(("ui.spec.attach", json!({"file": r.file})));
                     ui.close();
                 }
                 ui.separator();

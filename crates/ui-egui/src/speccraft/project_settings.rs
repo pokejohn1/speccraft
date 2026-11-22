@@ -39,8 +39,9 @@ pub(crate) fn change(app: &mut WordApp, changes: Value) -> Result<(), String> {
     Ok(())
 }
 
-/// The three parts of the pane.
+/// The parts of the pane.
 pub(crate) fn show(app: &mut WordApp, ui: &mut Ui, info: &Value) {
+    attachments(app, ui, info);
     furniture(app, ui, info);
     print_options(app, ui, info);
     standards(app, ui);
@@ -48,6 +49,56 @@ pub(crate) fn show(app: &mut WordApp, ui: &mut Ui, info: &Value) {
 
 fn lines_of(v: &Value, side: &str) -> String {
     v.get(side).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")).unwrap_or_default()
+}
+
+/// Attached PDFs (M23): which section each goes with; remove one.
+fn attachments(app: &mut WordApp, ui: &mut Ui, info: &Value) {
+    let t = Tokens::get(ui.ctx());
+    let list = info.get("attachments").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut action: Option<Value> = None;
+    let head = crate::i18n::fmt(tl!("Attached PDFs ({n})"), &[("n", &list.len().to_string())]);
+    egui::CollapsingHeader::new(RichText::new(head).small()).id_salt("spec_attachments").default_open(false).show(ui, |ui| {
+        if list.is_empty() {
+            ui.label(RichText::new(tl!("None. Right-click a section › Attach PDF… to add a form, appendix or schedule.")).small().color(t.text_dim));
+        }
+        let folder = app.speccraft.project.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf)).unwrap_or_default();
+        for a in &list {
+            let s = |k: &str| a.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+            let file = s("file");
+            let name = std::path::Path::new(&file).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let missing = !folder.join(&file).is_file();
+            let section = info
+                .get("sections")
+                .and_then(Value::as_array)
+                .and_then(|x| x.iter().find(|r| r.get("file").and_then(Value::as_str) == Some(s("section").as_str())))
+                .and_then(|r| r.get("number").and_then(Value::as_str))
+                .unwrap_or("")
+                .to_string();
+            ui.horizontal_wrapped(|ui| {
+                let color = if missing { t.red } else { t.text };
+                ui.label(RichText::new(&name).small().strong().color(color));
+                let pages = a.get("pages").and_then(Value::as_u64).unwrap_or(0).to_string();
+                let detail = crate::i18n::fmt(tl!("{section}, {pages} pages"), &[("section", &section), ("pages", &pages)]);
+                ui.label(RichText::new(detail).small().color(t.text_dim));
+                if missing {
+                    ui.label(RichText::new(tl!("missing")).small().color(t.red));
+                }
+                let r = ui.small_button(tl!("Remove")).on_hover_text(tl!("Take it off the section; the PDF stays in the Attachments folder"));
+                if r.clicked() {
+                    action = Some(json!({"file": file}));
+                }
+            });
+            let title = s("title");
+            if !title.is_empty() {
+                ui.label(RichText::new(title).small().color(t.text_dim));
+            }
+        }
+    });
+    if let Some(args) = action
+        && let Err(e) = app.run("ui.spec.detach", args)
+    {
+        app.status(e);
+    }
 }
 
 /// Header and Footer: lines on the left and right, with {fields}.
@@ -203,6 +254,14 @@ fn print_options(app: &mut WordApp, ui: &mut Ui, info: &Value) {
                 &[("file", "The section file's"), ("number", "Number"), ("numberTitle", "Number and title")],
             );
             choose(ui, &print, c, "pageNumbers", "Manual page numbers", &[("restart", "From 1 in each section"), ("continue", "Running on")]);
+            choose(
+                ui,
+                &print,
+                c,
+                "attachments",
+                "Attached PDFs",
+                &[("after", "After their section"), ("end", "At the end of the manual"), ("none", "Left out")],
+            );
             ui.label(RichText::new(tl!("Publish and Project Manual use these.")).small().color(t.text_dim));
         },
     );

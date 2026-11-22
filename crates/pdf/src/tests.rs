@@ -3000,3 +3000,31 @@ fn chart_and_equation_text_keep_their_pdf_bytes() {
         ["B", "o", "d", "y", " ", "t", "e", "x", "R", "v", "n", "u", "2", "0", "4", "+", "1", "\u{1D465}"].into_iter().map(String::from).collect();
     assert_eq!(shown, expected);
 }
+
+/// Speccraft: another PDF's pages go in among the document's, and bookmarks still point at the
+/// document's own pages.
+#[test]
+fn other_pdfs_pages_are_put_in_after_the_given_page() {
+    let page = |text: &str| {
+        let mut p = Paragraph::with_text(text, CharProps::default());
+        p.props.page_break_before = Some(true);
+        p.props.outline_level = Some(0);
+        Arc::new(Block::Para(p))
+    };
+    let mut d = Document::new();
+    d.body = vec![page("One"), page("Two"), page("Three")];
+    let mut attach = Document::new();
+    attach.body = vec![page("Form A"), page("Form B")];
+    let form = Arc::new(export(&attach, &PdfOptions::default()).unwrap());
+    let opts =
+        PdfOptions { inserts: vec![PdfInsert { after: 1, pdf: form.clone() }, PdfInsert { after: 99, pdf: form.clone() }], ..Default::default() };
+    let bytes = export(&d, &opts).unwrap();
+    let pdf = hayro_syntax::Pdf::new(bytes.clone()).unwrap();
+    assert_eq!(pdf.pages().len(), 3 + 2 + 2);
+    // Garbage is refused, not a crash.
+    let bad = PdfOptions { inserts: vec![PdfInsert { after: 0, pdf: Arc::new(b"not a pdf".to_vec()) }], ..Default::default() };
+    assert!(export(&d, &bad).is_err());
+    // Not with imposition or copies.
+    let copies = PdfOptions { sheet_copies: 2, inserts: vec![PdfInsert { after: 0, pdf: form }], ..Default::default() };
+    assert!(export(&d, &copies).is_err());
+}

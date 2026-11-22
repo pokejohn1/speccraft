@@ -42,7 +42,14 @@ pub struct Part {
     pub file: String,
     pub pages: usize,
     pub doc: Document,
+    /// Its attached PDFs (M23): (name, title, pages) for the contents.
+    pub attached: Vec<(String, String, usize)>,
 }
+
+/// A contents row for an attachment after its section, or at the end: its number column holds
+/// this, then its name.
+const ATTACHMENT_ROW: &str = "\u{1}";
+const ATTACHMENT_END_ROW: &str = "\u{2}";
 
 /// The settings of a document's first section: on its first section break, else its last section.
 fn first_section(doc: &mut Document) -> &mut SectionProps {
@@ -128,6 +135,8 @@ pub struct Layout {
     /// Each section starts on an odd page: the blank page's text, and whether it has the header
     /// and footer of the section before it (M22).
     pub odd: Option<(String, bool)>,
+    /// Attached PDFs go at the end of the manual instead of after their sections (M23).
+    pub attachments_at_end: bool,
 }
 
 /// A blank page after a section with an odd number of pages, so the next starts on an odd page.
@@ -155,10 +164,30 @@ fn blank_page(out: &mut Document, text: &str, furniture: bool) -> bool {
     true
 }
 
-/// The manual: the table of contents (if any), then each part on its own pages.
-pub fn build(info: &project::Info, parts: Vec<Part>, layout: &Layout) -> Result<Document, CmdError> {
+/// The contents' rows: each part, then its attachments (after it, or all at the end).
+fn contents_rows(parts: &[Part], attached_at_end: bool) -> Vec<(String, String, usize)> {
+    let mark = if attached_at_end { ATTACHMENT_END_ROW } else { ATTACHMENT_ROW };
+    let row = |(name, title, pages): &(String, String, usize)| (format!("{mark}{name}"), title.clone(), *pages);
+    let mut toc = Vec::new();
+    for p in parts {
+        toc.push((p.number.clone(), p.title.clone(), p.pages));
+        if !attached_at_end {
+            toc.extend(p.attached.iter().map(row));
+        }
+    }
+    if attached_at_end {
+        toc.extend(parts.iter().flat_map(|p| p.attached.iter().map(row)));
+    }
+    toc
+}
+
+/// The manual: the table of contents (if any), then each part on its own pages. Also returns
+/// where each part starts (its first block).
+pub fn build(info: &project::Info, parts: Vec<Part>, layout: &Layout) -> Result<(Document, Vec<usize>), CmdError> {
     let (contents, restart) = (layout.contents, layout.restart);
     let toc: Vec<(String, String, usize)> = parts.iter().map(|p| (p.number.clone(), p.title.clone(), p.pages)).collect();
+    let rows = contents_rows(&parts, layout.attachments_at_end);
+    let mut starts = vec![0usize];
     let mut docs = parts.into_iter().map(|p| p.doc);
     let Some(mut out) = docs.next() else { return Err(CmdError::Failed("no section to put in the manual".into())) };
     if restart {
@@ -183,6 +212,7 @@ pub fn build(info: &project::Info, parts: Vec<Part>, layout: &Layout) -> Result<
             }
         }
         let last = d.last_section.clone();
+        starts.push(out.body.len());
         // Its own styles (renamed where ours have the name), so its lists number from 1 again
         // and its formatting is its own.
         let blocks = out.adopt_blocks(d, true, &mut perms);
@@ -190,14 +220,19 @@ pub fn build(info: &project::Info, parts: Vec<Part>, layout: &Layout) -> Result<
         out.last_section = last;
     }
     if contents {
-        put_contents(&mut out, info, &toc);
+        let before = out.body.len();
+        put_contents(&mut out, info, &rows);
+        let added = out.body.len().saturating_sub(before);
+        for s in &mut starts {
+            *s += added;
+        }
         if layout.odd.is_some() {
             // The first section after the contents starts on an odd page too.
             first_section_after_contents(&mut out);
         }
     }
     out.custom_props.retain(|p| !p.name.starts_with("Speccraft."));
-    Ok(out)
+    Ok((out, starts))
 }
 
 /// Paragraphs for the table of contents, in their own first section: the first section's page
@@ -221,13 +256,29 @@ fn put_contents(out: &mut Document, info: &project::Info, toc: &[(String, String
     front.push(text("TABLE OF CONTENTS", 14.0, true, Align::Center, 12.0));
     let mut last_div = None;
     for (number, title, pages) in toc {
-        let div = number_key(number).get(..2).unwrap_or("").to_string();
+        let after = number.strip_prefix(ATTACHMENT_ROW);
+        let at_end = number.strip_prefix(ATTACHMENT_END_ROW);
+        let attachment = after.or(at_end);
+        // Attachments after their section stay under its division; at the end, under their own head.
+        let div = match (after, at_end) {
+            (Some(_), _) => last_div.clone().unwrap_or_default(),
+            (_, Some(_)) => "attachments".to_string(),
+            _ => number_key(number).get(..2).unwrap_or("").to_string(),
+        };
         if last_div.as_ref() != Some(&div) {
-            let head = if div.is_empty() { "OTHER SECTIONS".to_string() } else { format!("DIVISION {div} - {}", division_name(&div).to_uppercase()) };
+            let head = match div.as_str() {
+                "" => "OTHER SECTIONS".to_string(),
+                "attachments" => "ATTACHMENTS".to_string(),
+                d => format!("DIVISION {d} - {}", division_name(d).to_uppercase()),
+            };
             front.push(text(&head, 11.0, true, Align::Left, 4.0));
             last_div = Some(div);
         }
-        let name = if number.is_empty() { title.clone() } else { format!("{number}\t{title}") };
+        let name = match attachment {
+            Some(n) => format!("\t{n}{}", if title.is_empty() { String::new() } else { format!(" - {title}") }),
+            None if number.is_empty() => title.clone(),
+            None => format!("{number}\t{title}"),
+        };
         let mut p = Paragraph::with_text(&format!("{name}\t{pages}"), CharProps { size: Some(11.0), ..Default::default() });
         p.props.space_after = Some(2.0);
         p.props.tabs = Some(vec![
@@ -272,7 +323,7 @@ fn first_section_after_contents(out: &mut Document) {
 }
 
 /// Only the table of contents, on the first section's page.
-fn contents_only(info: &project::Info, parts: &[Part]) -> Document {
+fn contents_only(info: &project::Info, parts: &[Part], attached_at_end: bool) -> Document {
     let mut out = Document::new();
     if let Some(first) = parts.first() {
         out.styles = first.doc.styles.clone();
@@ -280,7 +331,7 @@ fn contents_only(info: &project::Info, parts: &[Part]) -> Document {
     }
     out.last_section.headers = HeaderSet::default();
     out.last_section.footers = HeaderSet::default();
-    let toc: Vec<(String, String, usize)> = parts.iter().map(|p| (p.number.clone(), p.title.clone(), p.pages)).collect();
+    let toc = contents_rows(parts, attached_at_end);
     out.body.clear();
     put_contents(&mut out, info, &toc);
     // The contents' section is the document's last: no empty page after it.
@@ -293,6 +344,11 @@ fn contents_only(info: &project::Info, parts: &[Part]) -> Document {
     }
     out.ensure_nonempty();
     out
+}
+
+/// The pages of the attached PDFs.
+fn listed_pages(attached: &[Vec<std::sync::Arc<Vec<u8>>>]) -> usize {
+    attached.iter().flatten().filter_map(|b| wordcraft_pdf::pdf_page_count(b).ok()).sum()
 }
 
 fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
@@ -340,6 +396,9 @@ fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
     }
     let mut parts = Vec::new();
     let mut skipped = Vec::new();
+    // Each part's attached PDFs (M23), for the PDF.
+    let mut attached: Vec<Vec<std::sync::Arc<Vec<u8>>>> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     let division = p::str(v, "division").map(project::number_key_prefix);
     for sec in f.sections.iter().filter(|x| x.included && division.as_ref().is_none_or(|d| number_key(&x.number).starts_with(d.as_str()))) {
         let full = dir.join(&sec.file);
@@ -353,7 +412,10 @@ fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
             Ok(mut i) => {
                 output::strip_markings(&mut i.copy);
                 let pages = output::page_count(&i.copy);
-                parts.push(Part { number: sec.number.clone(), title: sec.title.clone(), file: sec.file.clone(), pages, doc: i.copy });
+                let rows = i.attachments.iter().map(|(a, _)| (a.name(), a.title.clone(), a.pages)).collect();
+                attached.push(i.attachments.iter().map(|(_, b)| b.clone()).collect());
+                warnings.extend(i.warnings.iter().filter(|w| w.starts_with("attachment ")).cloned());
+                parts.push(Part { number: sec.number.clone(), title: sec.title.clone(), file: sec.file.clone(), pages, doc: i.copy, attached: rows });
             }
             Err(e) => skipped.push(json!({"file": sec.file, "error": e.to_string()})),
         }
@@ -363,19 +425,56 @@ fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
     }
     let listed: Vec<Value> = parts.iter().map(|p| json!({"file": p.file, "number": p.number, "title": p.title, "pages": p.pages})).collect();
     let contents = p::bool(v, "contents").unwrap_or(opts.contents);
-    let layout = Layout { contents, restart, odd: opts.odd_pages.then(|| (opts.blank_page_text.clone(), opts.blank_page_furniture)) };
-    let manual = if p::bool(v, "contentsOnly") == Some(true) { contents_only(&f.project, &parts) } else { build(&f.project, parts, &layout)? };
-    let pages = output::page_count(&manual);
+    let at_end = opts.attachments == "end";
+    let layout = Layout {
+        contents,
+        restart,
+        odd: opts.odd_pages.then(|| (opts.blank_page_text.clone(), opts.blank_page_furniture)),
+        attachments_at_end: at_end,
+    };
+    let only_contents = p::bool(v, "contentsOnly") == Some(true);
+    let (manual, starts) = if only_contents { (contents_only(&f.project, &parts, at_end), Vec::new()) } else { build(&f.project, parts, &layout)? };
+    let lay = wordcraft_layout::layout(
+        &manual,
+        &mut wordcraft_layout::LayoutCache::new(),
+        &wordcraft_layout::LayoutOptions { view: wordcraft_layout::ViewMode::Print, ..Default::default() },
+    );
+    let pages = lay.pages.len();
+    // Attached PDFs go in before the next section's first page, or at the end (M23).
+    let mut inserts = Vec::new();
+    if !only_contents {
+        for (k, list) in attached.iter().enumerate() {
+            let after = if at_end {
+                usize::MAX
+            } else {
+                starts
+                    .get(k + 1)
+                    .and_then(|b| lay.page_of(&wordcraft_doc::Pos::new(wordcraft_doc::StoryRef::Body, wordcraft_doc::Path::top(*b), 0)))
+                    .unwrap_or(usize::MAX)
+            };
+            inserts.extend(list.iter().map(|pdf| wordcraft_pdf::PdfInsert { after, pdf: pdf.clone() }));
+        }
+    }
+    let attached_pages: usize = listed_pages(&attached);
     crate::io::create_dir_all(&out_dir).map_err(CmdError::Failed)?;
     let mut written = serde_json::Map::new();
     for ext in formats {
         let file = out_dir.join(format!("{name}.{ext}"));
-        let bytes = crate::io::save_bytes_opts(&format!("manual.{ext}"), &manual, &crate::io::ExportOptions::default()).map_err(CmdError::Failed)?;
+        let bytes = if *ext == "pdf" {
+            super::attachments::pdf_with(&manual, inserts.clone())?
+        } else {
+            if !inserts.is_empty() {
+                warnings.push("the Word manual has no attached PDFs: they go only into the PDF".into());
+            }
+            crate::io::save_bytes_opts(&format!("manual.{ext}"), &manual, &crate::io::ExportOptions::default()).map_err(CmdError::Failed)?
+        };
         crate::io::write_file(&file.to_string_lossy(), &bytes).map_err(CmdError::Failed)?;
         written.insert((*ext).to_string(), json!(file.to_string_lossy()));
     }
     let check = json!({"errors": errors, "warnings": checked["warnings"], "notices": checked["notices"]});
-    Ok(json!({"files": written, "pages": pages, "sections": listed, "skipped": skipped, "check": check}))
+    Ok(
+        json!({"files": written, "pages": pages, "attachedPages": attached_pages, "attachments": inserts.len(), "sections": listed, "skipped": skipped, "check": check, "warnings": warnings}),
+    )
 }
 
 #[cfg(test)]

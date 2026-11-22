@@ -53,6 +53,43 @@ fn export_layout_inner(doc: &Document, lay: &DocLayout, opts: &PdfOptions) -> Re
     }
 }
 
+/// The number of pages of a PDF (Speccraft: an attachment's), or why it can't be read.
+pub fn pdf_page_count(bytes: &[u8]) -> Result<usize, PdfError> {
+    let doc = krilla::pdf::Pdf::new(bytes.to_vec()).map_err(|e| PdfError::Write(format!("not a PDF that can be read: {e:?}")))?;
+    Ok(doc.pages().len())
+}
+
+/// Most pages put in from other PDFs.
+const MAX_INSERTED_PAGES: usize = 5000;
+
+/// The other PDFs to put in (`PdfOptions::inserts`), read: (after this many of our pages, the
+/// PDF, its page count), in order.
+fn inserted(opts: &PdfOptions, ours: usize) -> Result<Vec<(usize, krilla::pdf::PdfDocument, usize)>, PdfError> {
+    if opts.inserts.is_empty() {
+        return Ok(Vec::new());
+    }
+    if opts.imposition != imposition::Imposition::Single || opts.sheet_copies > 1 {
+        return Err(PdfError::Write("other PDFs can only be put into a plain export".into()));
+    }
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    for (k, ins) in opts.inserts.iter().enumerate() {
+        let doc =
+            krilla::pdf::Pdf::new(ins.pdf.as_ref().clone()).map_err(|e| PdfError::Write(format!("attached PDF {} can't be read: {e:?}", k + 1)))?;
+        let n = doc.pages().len();
+        if n == 0 {
+            return Err(PdfError::Write(format!("attached PDF {} has no pages", k + 1)));
+        }
+        total = total.saturating_add(n);
+        if total > MAX_INSERTED_PAGES {
+            return Err(PdfError::Write(format!("attached PDFs have more than {MAX_INSERTED_PAGES} pages")));
+        }
+        out.push((ins.after.min(ours), krilla::pdf::PdfDocument::new(std::sync::Arc::new(doc)), n));
+    }
+    out.sort_by_key(|(after, _, _)| *after);
+    Ok(out)
+}
+
 /// How many unsubsettable fonts we fall back to outlines for before giving up.
 const MAX_OUTLINED_FONTS: usize = 32;
 
@@ -78,11 +115,14 @@ fn write_attempt(doc: &Document, lay: &DocLayout, opts: &PdfOptions, pages: &[us
     } else {
         one_copy.iter().flat_map(|s| std::iter::repeat_n(s, copies)).collect()
     };
+    // Other PDFs' pages put in among ours (Speccraft attachments): ours move along by them.
+    let inserts = inserted(opts, sheets.len())?;
+    let before = |output: usize| inserts.iter().filter(|(after, _, _)| *after <= output).map(|(_, _, n)| *n).sum::<usize>();
     let mut destinations = HashMap::new();
     for (output, sheet) in sheets.iter().enumerate() {
         for slot in &sheet.slots {
             let page = lay.pages.get(slot.page).ok_or(PdfError::BadPage(slot.page.saturating_add(1)))?;
-            destinations.entry(slot.page).or_insert((output, Fit::in_slot(page, *slot)));
+            destinations.entry(slot.page).or_insert((output + before(output), Fit::in_slot(page, *slot)));
         }
     }
     let settings = krilla::SerializeSettings { compress_content_streams: opts.compress, enable_tagging: opts.tagged, ..Default::default() };
@@ -109,7 +149,11 @@ fn write_attempt(doc: &Document, lay: &DocLayout, opts: &PdfOptions, pages: &[us
     if let Some(o) = ex.outline(pages) {
         pdf.set_outline(o);
     }
-    for sheet in sheets {
+    let sheet_count = sheets.len();
+    for (output, sheet) in sheets.into_iter().enumerate() {
+        for (_, doc_pdf, n) in inserts.iter().filter(|(after, _, _)| *after == output) {
+            pdf.embed_pdf_pages(doc_pdf, &(0..*n).collect::<Vec<_>>());
+        }
         let size = Size::from_wh(clamp_side(sheet.width), clamp_side(sheet.height)).ok_or(PdfError::NoPages)?;
         let mut kp = pdf.start_page_with(PageSettings::new(size));
         let mut annotations = Vec::new();
@@ -137,6 +181,9 @@ fn write_attempt(doc: &Document, lay: &DocLayout, opts: &PdfOptions, pages: &[us
             kp.add_annotation(annotation);
         }
         kp.finish();
+    }
+    for (_, doc_pdf, n) in inserts.iter().filter(|(after, _, _)| *after >= sheet_count) {
+        pdf.embed_pdf_pages(doc_pdf, &(0..*n).collect::<Vec<_>>());
     }
     if opts.tagged {
         pdf.set_tag_tree(ex.tag_tree());

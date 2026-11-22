@@ -91,6 +91,8 @@ pub struct PrintOptions {
     pub contents: bool,
     /// "pdf", "docx" or "both".
     pub format: String,
+    /// Attached PDFs (M23): "after" each section, at the "end" of the manual, or "none".
+    pub attachments: String,
 }
 
 impl Default for PrintOptions {
@@ -111,6 +113,7 @@ impl Default for PrintOptions {
             page_numbers: "restart".into(),
             contents: true,
             format: "pdf".into(),
+            attachments: "after".into(),
         }
     }
 }
@@ -126,6 +129,7 @@ impl PrintOptions {
         one_of("fileNames", &self.file_names, &["file", "number", "numberTitle"])?;
         one_of("pageNumbers", &self.page_numbers, &["restart", "continue"])?;
         one_of("format", &self.format, &["pdf", "docx", "both"])?;
+        one_of("attachments", &self.attachments, &["after", "end", "none"])?;
         if self.watermark.chars().count() > 60 || self.blank_page_text.chars().count() > MAX_LINE {
             return Err(CmdError::Params("`watermark` is at most 60 characters and `blankPageText` 300".into()));
         }

@@ -186,6 +186,10 @@ pub struct Issued {
     pub counts: Counts,
     pub filled: usize,
     pub warnings: Vec<String>,
+    /// The section's attached PDFs (M23), read; empty when the print options leave them out.
+    pub attachments: Vec<(super::attachments::Attachment, std::sync::Arc<Vec<u8>>)>,
+    /// Where the manual puts them: "after" the section or at the "end".
+    pub attachments_at: String,
 }
 
 pub fn issued_copy(s: &Session, project: Option<&str>) -> Result<Issued, CmdError> {
@@ -238,6 +242,12 @@ pub fn issued_copy_with(s: &Session, project: Option<&str>, form: super::forms::
         }
     }
     super::print::apply(&mut copy, &opts, &number);
+    let mut attachments = Vec::new();
+    if let (Some(f), Some(file), Some(pp)) = (&loaded, file.as_deref(), super::project::project_for(s.path.as_deref(), project)?)
+        && opts.attachments != "none"
+    {
+        attachments = super::attachments::read_for(&pp, f, file, &mut warnings);
+    }
     if c.printed == 0 {
         warnings.push("nothing is switched on: the copy is a blank page".to_string());
     }
@@ -255,7 +265,7 @@ pub fn issued_copy_with(s: &Session, project: Option<&str>, form: super::forms::
     if c.breaks_kept > 0 {
         warnings.push(format!("{} section break(s) kept on an empty paragraph", c.breaks_kept));
     }
-    Ok(Issued { copy, counts: c, filled, warnings })
+    Ok(Issued { copy, counts: c, filled, warnings, attachments, attachments_at: opts.attachments.clone() })
 }
 
 /// Take Speccraft's own markings off a copy so it is a plain Word document: the content controls
@@ -318,10 +328,17 @@ fn export_pdf(s: &mut Session, v: &Value) -> CmdResult {
     let path = target(s, v, "pdf")?;
     let issued = issued_copy_with(s, crate::p::str(v, "project"), super::forms::Form::from_params(v)?, v.get("print"))?;
     let pages = page_count(&issued.copy);
-    let bytes = crate::io::save_bytes_opts("printable.pdf", &issued.copy, &crate::io::ExportOptions::default()).map_err(CmdError::Failed)?;
+    // The section's attached PDFs follow it (M23).
+    let inserts: Vec<wordcraft_pdf::PdfInsert> =
+        issued.attachments.iter().map(|(_, b)| wordcraft_pdf::PdfInsert { after: usize::MAX, pdf: b.clone() }).collect();
+    let attached: usize = issued.attachments.iter().map(|(a, _)| a.pages).sum();
+    let bytes = super::attachments::pdf_with(&issued.copy, inserts)?;
     let shown = path.to_string_lossy().to_string();
     crate::io::write_file(&shown, &bytes).map_err(CmdError::Failed)?;
-    Ok(report(&shown, bytes.len(), pages, &issued))
+    let mut r = report(&shown, bytes.len(), pages, &issued);
+    r["attachments"] = json!(issued.attachments.len());
+    r["attachedPages"] = json!(attached);
+    Ok(r)
 }
 
 /// Write a Word document of the paragraphs that print, without Speccraft's markings (M13).

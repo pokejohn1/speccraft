@@ -50,6 +50,9 @@ pub struct PdfOptions {
     /// How [`export`] shows digits (the Numeral setting; callers resolve `System`, see
     /// [`NumeralMode::resolve`]). [`export_layout`] keeps the layout it is given.
     pub numeral: NumeralMode,
+    /// Pages of other PDFs put in among the document's pages (Speccraft attachments). Only for a
+    /// plain export: one copy, one page per sheet.
+    pub inserts: Vec<PdfInsert>,
 }
 
 /// How many characters of the watermark text the PDF draws.
@@ -98,6 +101,15 @@ impl Default for PdfOptions {
             links: true,
             paper: None,
             numeral: NumeralMode::Arabic,
+            inserts: Vec::new(),
         }
     }
+}
+
+/// Pages of another PDF put into the export (Speccraft: a section's attachments): all of
+/// `pdf`'s pages, after the first `after` pages of the document.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PdfInsert {
+    pub after: usize,
+    pub pdf: std::sync::Arc<Vec<u8>>,
 }

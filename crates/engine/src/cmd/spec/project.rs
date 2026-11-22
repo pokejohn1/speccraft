@@ -125,6 +125,9 @@ pub struct ProjectFile {
     /// Print and export options (M22).
     #[serde(default)]
     pub print: super::print::PrintOptions,
+    /// PDFs attached to sections (M23), in the project's Attachments folder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<super::attachments::Attachment>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -619,6 +622,7 @@ fn summary(path: &Path, f: &ProjectFile) -> Value {
         "footer": f.footer,
         "editing": f.editing,
         "standards": f.standards,
+        "attachments": f.attachments,
     })
 }
 
