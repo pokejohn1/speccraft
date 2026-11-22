@@ -270,7 +270,7 @@ pub(crate) fn paint(app: &mut WordApp, ui: &mut Ui, painter: &Painter, rects: &[
                 None if m.linked && m.state != State::Overridden => Some(t.green),
                 None => None,
             };
-            if let Some(color) = bar_color {
+            if let Some(color) = bar_color.filter(|_| !app.speccraft.hide_rule_bars) {
                 let bar = Rect::from_min_max(pos2(mark.max.x + 1.5, mark.min.y), pos2(mark.max.x + 1.5 + (2.5 * scale).clamp(2.0, 4.0), mark.max.y));
                 painter.rect_filled(bar, 0.0, color);
             }
@@ -282,11 +282,12 @@ pub(crate) fn paint(app: &mut WordApp, ui: &mut Ui, painter: &Painter, rects: &[
             };
             if let Some((tag, color)) = tag
                 && m.state != State::Overridden
+                && !app.speccraft.hide_origin
             {
                 painter.text(pos2(mark.min.x - 2.0, mark.center().y), egui::Align2::RIGHT_CENTER, tag, font, color);
             }
             // Switched on or off this review round (M24): a blue bar left of the column.
-            if m.switched {
+            if m.switched && !app.speccraft.hide_review_bars {
                 let x = mark.min.x - (16.0 * scale).clamp(12.0, 28.0);
                 let bar = Rect::from_min_max(pos2(x, area.min.y), pos2(x + (2.0 * scale).clamp(2.0, 3.0), area.max.y.max(mark.max.y)));
                 painter.rect_filled(bar, 0.0, t.blue);

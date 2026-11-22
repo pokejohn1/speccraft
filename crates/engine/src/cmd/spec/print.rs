@@ -520,6 +520,8 @@ pub fn apply(doc: &mut Document, o: &PrintOptions, number: &str) {
         unlink(doc);
     }
     if o.draft {
+        // The author's project notes print after their paragraphs (M26).
+        super::notes::print_project_notes(doc);
         doc.settings.watermark = Some(Watermark {
             text: if o.watermark.trim().is_empty() { "DRAFT".into() } else { o.watermark.trim().to_string() },
             diagonal: true,

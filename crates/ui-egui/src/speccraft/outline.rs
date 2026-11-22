@@ -52,8 +52,14 @@ pub(crate) enum View {
     Checks,
     Updates,
     Printed,
-    /// Review comments (M25).
+    /// Review comments (M25) and the review round (M24).
     Comments,
+    /// The paragraph at the caret: notes, project note, tags, why (M26).
+    Paragraph,
+    /// The section's global terms (M26).
+    Terms,
+    /// The section's reference standards (M26).
+    Standards,
 }
 
 /// Rendered pages of the printed copy, for one document revision.
@@ -104,12 +110,15 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     ui.horizontal_wrapped(|ui| {
         for (v, label) in [
             (View::Outline, "Outline"),
+            (View::Paragraph, "Paragraph"),
             (View::Fields, "Fill-ins"),
+            (View::Terms, "Terms"),
+            (View::Standards, "Standards"),
             (View::Rules, "Rules"),
             (View::Checks, "Checks"),
             (View::Updates, "Updates"),
             (View::Printed, "Printed"),
-            (View::Comments, "Comments"),
+            (View::Comments, "Review"),
         ] {
             if ui.selectable_label(app.speccraft.view == v, tl!(label)).clicked() {
                 app.speccraft.view = v;
@@ -133,7 +142,17 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
         return super::updates::view(app, ui);
     }
     if app.speccraft.view == View::Comments {
+        super::manager::round(app, ui);
         return super::comments_view::view(app, ui);
+    }
+    if app.speccraft.view == View::Paragraph {
+        return super::manager::paragraph(app, ui);
+    }
+    if app.speccraft.view == View::Terms {
+        return super::manager::terms(app, ui);
+    }
+    if app.speccraft.view == View::Standards {
+        return super::manager::standards(app, ui);
     }
     let o = outline(app);
     let items: Vec<Value> = o.get("items").and_then(Value::as_array).cloned().unwrap_or_default();

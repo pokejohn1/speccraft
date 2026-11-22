@@ -53,6 +53,7 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("spec.project.detach", "Remove Attachment", LOC, detach_cmd)
             .params(r#"{"path": string, "file": string (as listed; the PDF stays in the Attachments folder)}"#),
         CommandSpec::new("spec.project.attachments", "List Attachments", LOC, list_cmd).params(r#"{"path": string}"#).pure(),
+        CommandSpec::new("spec.project.attachmentTitle", "Attachment Title", LOC, title_cmd).params(r#"{"path": string, "file": string, "title": string}"#),
     ]
 }
 
@@ -130,6 +131,20 @@ fn detach_cmd(_: &mut Session, v: &Value) -> CmdResult {
     let a = f.attachments.remove(at);
     project::store_file(&path, &f)?;
     Ok(json!({"removed": a, "count": f.attachments.len()}))
+}
+
+fn title_cmd(_: &mut Session, v: &Value) -> CmdResult {
+    let path = PathBuf::from(p::req_str(v, "path")?);
+    let file = p::req_str(v, "file")?.trim().to_string();
+    let title = p::req_str(v, "title")?.trim().to_string();
+    if title.chars().count() > 200 || title.contains(['\n', '\r']) {
+        return Err(CmdError::Params("`title` is one line of at most 200 characters".into()));
+    }
+    let mut f = project::load(&path)?;
+    let a = f.attachments.iter_mut().find(|a| a.file == file).ok_or_else(|| CmdError::Failed(format!("no attachment {file:?}")))?;
+    a.title = title.clone();
+    project::store_file(&path, &f)?;
+    Ok(json!({"file": file, "title": title}))
 }
 
 fn list_cmd(_: &mut Session, v: &Value) -> CmdResult {
@@ -284,5 +299,7 @@ mod tests {
         let r = run("spec.project.detach", json!({"path": p, "file": "Attachments/087100-ATT2.pdf"}));
         assert_eq!(r["count"], 1);
         assert!(proj.join("Attachments").join("087100-ATT2.pdf").exists());
+        run("spec.project.attachmentTitle", json!({"path": p, "file": "Attachments/087100-ATT1.pdf", "title": "Keying Form"}));
+        assert_eq!(run("spec.project.attachments", json!({"path": p}))["attachments"][0]["title"], "Keying Form");
     }
 }

@@ -21,6 +21,7 @@ pub(crate) mod checks;
 pub(crate) mod choices;
 pub(crate) mod comments_view;
 pub(crate) mod library;
+pub(crate) mod manager;
 pub(crate) mod marks;
 pub(crate) mod outline;
 pub(crate) mod overview;
@@ -90,6 +91,21 @@ pub struct SpecUi {
     /// Comments view (M25): priorities hidden, and whether resolved and closed ones are hidden.
     pub(crate) comment_hidden: std::collections::BTreeSet<String>,
     pub(crate) comment_open_only: bool,
+    /// Paragraph view (M26): (paragraph id, project note, tags) being edited.
+    pub(crate) para_form: Option<(String, String, String)>,
+    /// What Publish and Manual cover (M26): "all", a division's two digits, or "contents".
+    pub(crate) publish_scope: String,
+    /// Sections open in place of the one on screen instead of in tabs of their own (M26).
+    pub(crate) in_place: bool,
+    /// Margin columns hidden (M26): M* / U, the rule bar, the review bar.
+    pub(crate) hide_origin: bool,
+    pub(crate) hide_rule_bars: bool,
+    pub(crate) hide_review_bars: bool,
+    /// Attachment titles being edited (M26), by file.
+    pub(crate) attachment_titles: std::collections::HashMap<String, String>,
+    /// Terms view (M26): the search and the values being edited.
+    pub(crate) term_search: String,
+    pub(crate) term_drafts: std::collections::HashMap<String, String>,
     pub(crate) standard_drafts: std::collections::HashMap<String, (String, String)>,
     pub(crate) print_form: wordcraft_engine::cmd::spec::forms::Form,
     pub(crate) publish_form: wordcraft_engine::cmd::spec::forms::Form,
@@ -163,7 +179,10 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
                     "rules" => outline::View::Rules,
                     "checks" => outline::View::Checks,
                     "updates" => outline::View::Updates,
-                    "comments" => outline::View::Comments,
+                    "comments" | "review" => outline::View::Comments,
+                    "paragraph" => outline::View::Paragraph,
+                    "terms" => outline::View::Terms,
+                    "standards" => outline::View::Standards,
                     _ => outline::View::Outline,
                 };
             }
@@ -325,8 +344,15 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
             let form = app.speccraft.publish_form;
             let depth = if let wordcraft_engine::cmd::spec::forms::Form::Outline(d) = form { d } else { 1 };
             let form_name = s("form").unwrap_or_else(|| form.name().to_string());
-            let args =
+            let mut args =
                 json!({"path": path, "force": force, "format": format, "form": form_name, "depth": p.get("depth").cloned().unwrap_or(json!(depth))});
+            // Scope (M26): one division, or only the manual's table of contents.
+            match app.speccraft.publish_scope.as_str() {
+                "" | "all" => {}
+                "contents" if id == "ui.spec.manual" => args["contentsOnly"] = json!(true),
+                "contents" => {}
+                d => args["division"] = json!(d),
+            }
             let r = match app.run(engine, args) {
                 Ok(r) => r,
                 Err(e) => {
@@ -359,6 +385,12 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
             };
             app.status(msg);
             Ok(r)
+        }
+        "ui.spec.ownFurniture" => {
+            let file = s("file").ok_or("`file` must name a section file of the project")?;
+            let value = p.get("value").and_then(Value::as_bool).unwrap_or(true);
+            project_settings::change(app, json!({"file": file, "ownFurniture": value}))?;
+            Ok(json!({"file": file, "ownFurniture": value}))
         }
         "ui.spec.attach" => {
             let file = s("file").ok_or("`file` must name a section file of the project")?;
@@ -536,6 +568,18 @@ fn open_section(app: &mut WordApp, file: &str) -> Result<Value, String> {
     }
     // In a tab of its own (M15): the section on screen keeps its changes in its tab.
     let was_open = tabs::open(app, &path)?;
+    // In place (M26): the other section tabs close (saved first).
+    if app.speccraft.in_place {
+        let here = app.session.document_id();
+        for id in app.speccraft.tab_order.clone() {
+            if id != here
+                && app.session.is_open(id)
+                && let Err(e) = tabs::close(app, id)
+            {
+                app.status(e);
+            }
+        }
+    }
     // Terms, references, units and the header and footer as the project has them now (M20, M21).
     project_settings::sync_open(app);
     if !was_open {
@@ -628,6 +672,16 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
 // The Sections pane
 
 /// A section row of the pane, from `spec.project.info`.
+/// Whether section file `file` keeps its own header and footer (M26).
+fn section_keeps_own(info: &Value, file: &str) -> bool {
+    info.get("sections")
+        .and_then(Value::as_array)
+        .and_then(|a| a.iter().find(|x| x.get("file").and_then(Value::as_str) == Some(file)))
+        .and_then(|x| x.get("ownFurniture"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// The attachments of section file `file`, as "087100-ATT1 - Title" (M23).
 fn attachments_of(info: &Value, file: &str) -> Vec<String> {
     info.get("attachments")
@@ -729,6 +783,25 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
         if ui.small_button(tl!("Publish")).on_hover_text(tl!("Each included section as its own file")).clicked() {
             let _ = app.run("ui.spec.publish", json!({}));
         }
+        ui.menu_button(tl!("Options"), |ui| {
+            let mut tabs = !app.speccraft.in_place;
+            ui.checkbox(&mut tabs, tl!("Open sections in tabs")).on_hover_text(tl!("Off: a section opens in place of the one on screen"));
+            app.speccraft.in_place = !tabs;
+            ui.separator();
+            ui.label(RichText::new(tl!("Margin columns")).small());
+            let mut show = !app.speccraft.hide_origin;
+            ui.checkbox(&mut show, tl!("M* and U"));
+            app.speccraft.hide_origin = !show;
+            let mut show = !app.speccraft.hide_rule_bars;
+            ui.checkbox(&mut show, tl!("Rule bars"));
+            app.speccraft.hide_rule_bars = !show;
+            let mut show = !app.speccraft.hide_review_bars;
+            ui.checkbox(&mut show, tl!("Review bars"));
+            app.speccraft.hide_review_bars = !show;
+            let mut show = !app.speccraft.hide_marks;
+            ui.checkbox(&mut show, tl!("Sequence numbers"));
+            app.speccraft.hide_marks = !show;
+        });
         if ui.small_button(tl!("Manual")).on_hover_text(tl!("All included sections as one project manual, with a table of contents")).clicked() {
             let _ = app.run("ui.spec.manual", json!({}));
         }
@@ -739,6 +812,31 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
             _ => tl!("PDF"),
         };
         outline::form_choice(ui, "spec_publish_form", &mut app.speccraft.publish_form);
+        // Scope (M26): the whole project, one division, or the manual's contents only.
+        let divisions: Vec<String> = {
+            let mut d: Vec<String> = rows(&info).iter().filter(|r| r.included).map(|r| division(&r.number)).filter(|d| !d.is_empty()).collect();
+            d.dedup();
+            d
+        };
+        let scope = app.speccraft.publish_scope.clone();
+        let shown = match scope.as_str() {
+            "" | "all" => tl!("All sections").to_string(),
+            "contents" => tl!("Contents only (manual)").to_string(),
+            d => crate::i18n::fmt(tl!("Division {n}"), &[("n", d)]),
+        };
+        craft_ui::ComboBox::from_id_salt("spec_publish_scope").selected_text(shown).show_ui(ui, |ui| {
+            if ui.selectable_label(scope.is_empty() || scope == "all", tl!("All sections")).clicked() {
+                app.speccraft.publish_scope = "all".into();
+            }
+            for d in &divisions {
+                if ui.selectable_label(scope == *d, crate::i18n::fmt(tl!("Division {n}"), &[("n", d)])).clicked() {
+                    app.speccraft.publish_scope = d.clone();
+                }
+            }
+            if ui.selectable_label(scope == "contents", tl!("Contents only (manual)")).clicked() {
+                app.speccraft.publish_scope = "contents".into();
+            }
+        });
         craft_ui::ComboBox::from_id_salt("spec_publish_format").selected_text(label(&fmt)).show_ui(ui, |ui| {
             for f in ["pdf", "docx", "both"] {
                 if ui.selectable_label(fmt == f, label(f)).clicked() {
@@ -809,6 +907,11 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
                 }
                 if ui.button(tl!("Move Down")).clicked() {
                     action = Some(("ui.spec.move", json!({"file": r.file, "by": 1})));
+                    ui.close();
+                }
+                let mut own = section_keeps_own(&info, &r.file);
+                if ui.checkbox(&mut own, tl!("Keep Its Own Header and Footer")).on_hover_text(tl!("Not the project's header and footer")).clicked() {
+                    action = Some(("ui.spec.ownFurniture", json!({"file": r.file, "value": own})));
                     ui.close();
                 }
                 ui.separator();

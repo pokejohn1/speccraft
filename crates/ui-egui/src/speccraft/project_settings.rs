@@ -56,6 +56,7 @@ fn attachments(app: &mut WordApp, ui: &mut Ui, info: &Value) {
     let t = Tokens::get(ui.ctx());
     let list = info.get("attachments").and_then(Value::as_array).cloned().unwrap_or_default();
     let mut action: Option<Value> = None;
+    let mut retitle: Option<(String, String)> = None;
     let head = crate::i18n::fmt(tl!("Attached PDFs ({n})"), &[("n", &list.len().to_string())]);
     egui::CollapsingHeader::new(RichText::new(head).small()).id_salt("spec_attachments").default_open(false).show(ui, |ui| {
         if list.is_empty() {
@@ -83,14 +84,20 @@ fn attachments(app: &mut WordApp, ui: &mut Ui, info: &Value) {
                 if missing {
                     ui.label(RichText::new(tl!("missing")).small().color(t.red));
                 }
+                if !missing && ui.small_button(tl!("Open")).on_hover_text(tl!("In the computer's PDF viewer")).clicked() {
+                    let full = folder.join(&file);
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(format!("file://{}", full.to_string_lossy())));
+                }
                 let r = ui.small_button(tl!("Remove")).on_hover_text(tl!("Take it off the section; the PDF stays in the Attachments folder"));
                 if r.clicked() {
                     action = Some(json!({"file": file}));
                 }
             });
             let title = s("title");
-            if !title.is_empty() {
-                ui.label(RichText::new(title).small().color(t.text_dim));
+            let draft = app.speccraft.attachment_titles.entry(file.clone()).or_insert_with(|| title.clone());
+            let r = ui.add(egui::TextEdit::singleline(draft).hint_text(tl!("Title, for the table of contents")).desired_width(f32::INFINITY));
+            if r.lost_focus() && *draft != title {
+                retitle = Some((file.clone(), draft.clone()));
             }
         }
     });
@@ -98,6 +105,18 @@ fn attachments(app: &mut WordApp, ui: &mut Ui, info: &Value) {
         && let Err(e) = app.run("ui.spec.detach", args)
     {
         app.status(e);
+    }
+    if let Some((file, title)) = retitle
+        && let Ok(path) = super::project_path(app)
+    {
+        let r = app.run("spec.project.attachmentTitle", json!({"path": path, "file": file, "title": title}));
+        match r.and_then(|_| app.run("spec.project.info", json!({"path": path}))) {
+            Ok(info) => {
+                app.speccraft.info = Some(info);
+                app.speccraft.attachment_titles.clear();
+            }
+            Err(e) => app.status(e),
+        }
     }
 }
 
