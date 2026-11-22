@@ -135,8 +135,25 @@ pub(crate) fn marked(app: &mut WordApp, layout: &Arc<DocLayout>) -> Arc<Vec<Mark
             pieces: layout.selection_rects(doc, &x.range.content_start(), &x.range.end, hint),
         })
         .collect();
+    // Section references not wrapped (inside a choice's options, say) are found in the text.
+    let wrapped: Vec<(usize, usize, usize)> = terms::inline(doc)
+        .iter()
+        .filter(|x| x.kind == terms::InlineKind::Ref)
+        .filter_map(|x| Some((*x.range.start.path.0.first()? as usize, x.range.start.off, x.range.end.off)))
+        .collect();
     for (b, block) in doc.body.iter().enumerate() {
         let Some(p) = block.as_para() else { continue };
+        for r in terms::find_refs(&p.text) {
+            if wrapped.iter().any(|(wb, a, e)| *wb == b && r.range.start < *e && r.range.end > *a) {
+                continue;
+            }
+            let at = |off: usize| wordcraft_doc::Pos::new(wordcraft_doc::StoryRef::Body, wordcraft_doc::Path::top(b), off);
+            texts.push(MarkedText {
+                kind: TextKind::Ref,
+                name: r.number.clone(),
+                pieces: layout.selection_rects(doc, &at(r.range.start), &at(r.range.end), hint),
+            });
+        }
         for st in terms::find_standards(&p.text) {
             let at = |off: usize| wordcraft_doc::Pos::new(wordcraft_doc::StoryRef::Body, wordcraft_doc::Path::top(b), off);
             texts.push(MarkedText {

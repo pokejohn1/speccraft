@@ -25,12 +25,14 @@ impl WordApp {
         ui.keyboard = self.session.keymap.clone();
         ui.ribbon = self.session.ribbon.clone();
         ui.ink_pens = self.session.view.draw.pens.clone();
+        ui.speccraft = crate::speccraft::prefs_out(&self.speccraft);
         ui
     }
 
     /// Restore preferences saved by [`WordApp::prefs`].
     pub fn apply_prefs(&mut self, ui: UiState) {
         self.ui = ui;
+        crate::speccraft::prefs_in(&mut self.speccraft, &self.ui.speccraft);
         self.ui.backstage = false;
         // Word opens on Home every launch, so the tab `ui.json` holds is not restored. Going File
         // and back to the editor within the run still returns to the tab that was showing.

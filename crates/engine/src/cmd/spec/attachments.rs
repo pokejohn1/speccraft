@@ -292,6 +292,9 @@ mod tests {
         let w = crate::io::open_bytes("w.docx", &std::fs::read(docx["files"]["docx"].as_str().unwrap()).unwrap()).unwrap();
         let text = w.plain_text(wordcraft_doc::StoryRef::Body);
         assert!(text.contains("087100-ATT1 - Hardware Schedule Form"), "the contents list it: {text}");
+        // Running page numbers: same pages, the numbers go past the forms.
+        let running = run("spec.project.manual", json!({"path": p, "force": true, "name": "running", "print": {"pageNumbers": "continue"}}));
+        assert_eq!(pdf_pages(Path::new(running["files"]["pdf"].as_str().unwrap())), running["pages"].as_u64().unwrap() as usize + 4);
         // Left out when the print options say so.
         let none = run("spec.project.manual", json!({"path": p, "force": true, "name": "none", "print": {"attachments": "none"}}));
         assert_eq!(none["attachments"], 0);

@@ -426,6 +426,27 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
     }
 }
 
+/// The Speccraft settings kept between runs (M26): Sections pane › Options.
+pub(crate) fn prefs_out(s: &SpecUi) -> Value {
+    json!({
+        "inPlace": s.in_place,
+        "hideOrigin": s.hide_origin,
+        "hideRuleBars": s.hide_rule_bars,
+        "hideReviewBars": s.hide_review_bars,
+        "hideMarks": s.hide_marks,
+    })
+}
+
+/// Restore [`prefs_out`]; anything missing or of the wrong kind keeps its default.
+pub(crate) fn prefs_in(s: &mut SpecUi, v: &Value) {
+    let b = |k: &str, d: bool| v.get(k).and_then(Value::as_bool).unwrap_or(d);
+    s.in_place = b("inPlace", s.in_place);
+    s.hide_origin = b("hideOrigin", s.hide_origin);
+    s.hide_rule_bars = b("hideRuleBars", s.hide_rule_bars);
+    s.hide_review_bars = b("hideReviewBars", s.hide_review_bars);
+    s.hide_marks = b("hideMarks", s.hide_marks);
+}
+
 /// The open project's file, as a string for the engine commands.
 fn project_path(app: &WordApp) -> Result<String, String> {
     app.speccraft.project.as_ref().map(|p| p.to_string_lossy().into_owned()).ok_or_else(|| "open a project first".to_string())
@@ -1029,6 +1050,25 @@ fn save_info(app: &mut WordApp, info: &Value, form: &InfoForm) -> Result<Value, 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_options_survive_a_restart() {
+        let mut ui = SpecUi { in_place: true, hide_rule_bars: true, ..Default::default() };
+        let saved = prefs_out(&ui);
+        let mut back = SpecUi::default();
+        prefs_in(&mut back, &saved);
+        assert!(back.in_place && back.hide_rule_bars && !back.hide_origin);
+        // Nothing saved, or junk: the defaults stay.
+        ui = SpecUi::default();
+        prefs_in(&mut ui, &serde_json::Value::Null);
+        prefs_in(&mut ui, &serde_json::json!({"inPlace": "yes"}));
+        assert!(!ui.in_place);
+        // Through the whole UI preferences.
+        let state = crate::UiState { speccraft: saved, ..Default::default() };
+        let json = serde_json::to_vec(&state).unwrap();
+        let again = crate::UiState::from_json(&json).unwrap();
+        assert_eq!(again.speccraft["hideRuleBars"], true);
+    }
     use serde_json::json;
     use wordcraft_engine::Session;
 

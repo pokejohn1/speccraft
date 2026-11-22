@@ -415,6 +415,8 @@ pub struct UiState {
     pub recent_count: usize,
     /// File › Options › General: show the mini toolbar over a selection.
     pub mini_toolbar: bool,
+    /// Speccraft's own settings (M26: Sections pane › Options), kept as the fork writes them.
+    pub speccraft: serde_json::Value,
     /// File › Options › Advanced › Editing: moving a picture or shape snaps it to alignment
     /// guides (on by default; Alt moves freely).
     pub alignment_guides: bool,
@@ -508,6 +510,7 @@ impl Default for UiState {
             options_pane: "general".into(),
             recent_count: 12,
             mini_toolbar: true,
+            speccraft: serde_json::Value::Null,
             alignment_guides: true,
             start_screen: true,
             print_backgrounds: false,

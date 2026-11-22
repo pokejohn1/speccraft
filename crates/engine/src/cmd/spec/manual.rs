@@ -346,6 +346,34 @@ fn contents_only(info: &project::Info, parts: &[Part], attached_at_end: bool) ->
     out
 }
 
+/// With running page numbers, each section after attached PDFs starts its numbers past their
+/// pages: `starts` are the sections' first blocks, `first_pages` the pages they start on (0-based,
+/// without the attachments), `counts` the attached pages after each section.
+pub fn number_past_attachments(doc: &mut Document, starts: &[usize], first_pages: &[Option<usize>], counts: &[usize]) {
+    let mut extra = 0usize;
+    for (k, n) in counts.iter().enumerate() {
+        extra += n;
+        let (Some(start), Some(Some(page))) = (starts.get(k + 1), first_pages.get(k + 1)) else { continue };
+        if extra == 0 {
+            continue;
+        }
+        let number = u32::try_from(page + 1 + extra).unwrap_or(u32::MAX);
+        // The section the part starts: the first section break at or after its first block.
+        let at = doc.body.iter().enumerate().skip(*start).find(|(_, b)| b.as_para().is_some_and(|p| p.section.is_some())).map(|(i, _)| i);
+        match at {
+            Some(i) => {
+                if let Some(b) = doc.body.get_mut(i)
+                    && let Block::Para(p) = Arc::make_mut(b)
+                    && let Some(s) = p.section.as_deref_mut()
+                {
+                    s.page_num_start = Some(number);
+                }
+            }
+            None => doc.last_section.page_num_start = Some(number),
+        }
+    }
+}
+
 /// The pages of the attached PDFs.
 fn listed_pages(attached: &[Vec<std::sync::Arc<Vec<u8>>>]) -> usize {
     attached.iter().flatten().filter_map(|b| wordcraft_pdf::pdf_page_count(b).ok()).sum()
@@ -458,12 +486,22 @@ fn manual_cmd(s: &mut Session, v: &Value) -> CmdResult {
         }
     }
     let attached_pages: usize = listed_pages(&attached);
+    // Running page numbers count the attached pages too (the PDF only: the Word manual has none).
+    let mut manual_pdf = None;
+    if !only_contents && !restart && !at_end && attached_pages > 0 {
+        let counts: Vec<usize> = attached.iter().map(|l| l.iter().filter_map(|b| wordcraft_pdf::pdf_page_count(b).ok()).sum()).collect();
+        let first_pages: Vec<Option<usize>> =
+            starts.iter().map(|b| lay.page_of(&wordcraft_doc::Pos::new(wordcraft_doc::StoryRef::Body, wordcraft_doc::Path::top(*b), 0))).collect();
+        let mut m = manual.clone();
+        number_past_attachments(&mut m, &starts, &first_pages, &counts);
+        manual_pdf = Some(m);
+    }
     crate::io::create_dir_all(&out_dir).map_err(CmdError::Failed)?;
     let mut written = serde_json::Map::new();
     for ext in formats {
         let file = out_dir.join(format!("{name}.{ext}"));
         let bytes = if *ext == "pdf" {
-            super::attachments::pdf_with(&manual, inserts.clone(), markup)?
+            super::attachments::pdf_with(manual_pdf.as_ref().unwrap_or(&manual), inserts.clone(), markup)?
         } else {
             if !inserts.is_empty() {
                 warnings.push("the Word manual has no attached PDFs: they go only into the PDF".into());
@@ -592,5 +630,28 @@ mod tests {
         assert!(s.run("spec.project.manual", &json!({"path": ps, "format": "rtf"})).is_err());
         assert!(s.run("spec.project.manual", &json!({"path": ps, "name": "a/b"})).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn running_page_numbers_go_past_attached_pages() {
+        let p = |t: &str| Paragraph::with_text(t, Default::default());
+        let mut brk = p("end of part 1");
+        brk.section = Some(Box::default());
+        let mut brk2 = p("end of part 2");
+        brk2.section = Some(Box::default());
+        let mut d = Document::new();
+        d.body = vec![
+            Arc::new(Block::Para(p("part 1"))),
+            Arc::new(Block::Para(brk)),
+            Arc::new(Block::Para(p("part 2"))),
+            Arc::new(Block::Para(brk2)),
+            Arc::new(Block::Para(p("part 3"))),
+        ];
+        // Part 1 on page 2 with 2 attached pages after it; part 2 on page 4; part 3 on page 6.
+        super::number_past_attachments(&mut d, &[0, 2, 4], &[Some(1), Some(3), Some(5)], &[2, 0, 0]);
+        let sect = |i: usize| d.body[i].as_para().unwrap().section.as_ref().unwrap().page_num_start;
+        assert_eq!(sect(1), None, "part 1 is before the attachments");
+        assert_eq!(sect(3), Some(6));
+        assert_eq!(d.last_section.page_num_start, Some(8));
     }
 }
