@@ -80,6 +80,9 @@ pub(crate) enum AfterPick {
     /// Hand the picked path to the open dialog (`WordApp::dialog_pick`): Templates and Add-ins,
     /// Organizer (#377).
     ForDialog,
+    /// Speccraft (W8): several files for the Sections pane; all of them go to
+    /// `speccraft.picks`, the first to `dialog_pick` as for [`AfterPick::ForDialog`].
+    ForDialogMany,
     /// Put the picked document into the Compare dialog (original or revised, #412).
     ComparePath { revised: bool },
 }
@@ -200,6 +203,10 @@ impl WordApp {
     fn finish_picks(&mut self, after: AfterPick, picked: Vec<String>) -> Result<Value, String> {
         match after {
             AfterPick::Font if !picked.is_empty() => self.add_fonts(picked),
+            AfterPick::ForDialogMany => {
+                self.speccraft.picks = picked.iter().filter(|p| !p.is_empty()).cloned().collect();
+                self.finish_pick(AfterPick::ForDialog, picked.into_iter().next())
+            }
             after => self.finish_pick(after, picked.into_iter().next()),
         }
     }
@@ -277,6 +284,13 @@ impl WordApp {
                     self.status(msg);
                 }
                 r
+            }
+            AfterPick::ForDialogMany => {
+                // One file (the built-in browser picks one at a time).
+                self.speccraft.picks = picked.iter().filter(|p| !p.is_empty()).cloned().collect();
+                let picked = picked.filter(|p| !p.is_empty());
+                self.dialog_pick = picked.clone();
+                Ok(json!({"picked": picked}))
             }
             AfterPick::ForDialog => {
                 let picked = picked.filter(|p| !p.is_empty());

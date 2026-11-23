@@ -86,6 +86,8 @@ pub struct SpecUi {
     pub(crate) standards: Option<Value>,
     /// Print Options opens in the Sections pane next time it draws (Specs › Print Options).
     pub(crate) show_print_options: bool,
+    /// The files picked when several can be (W8: Add Sections).
+    pub(crate) picks: Vec<String>,
     /// The section a PDF is being attached to (M23).
     pub(crate) attach_to: Option<String>,
     /// Comments view (M25): priorities hidden, and whether resolved and closed ones are hidden.
@@ -268,9 +270,13 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
             app.speccraft.findings = None;
             Ok(json!({"closed": true}))
         }
-        "ui.spec.addSection" => match s("master") {
-            Some(master) => add_section(app, &master),
-            None => ask(app, Pick::AddMaster),
+        "ui.spec.addSection" => match (s("master"), p.get("masters").and_then(Value::as_array)) {
+            (Some(master), _) => add_section(app, &master),
+            (None, Some(list)) => {
+                let masters: Vec<String> = list.iter().filter_map(Value::as_str).take(500).map(str::to_string).collect();
+                add_sections(app, &masters)
+            }
+            (None, None) => ask(app, Pick::AddMaster),
         },
         "ui.spec.openSection" => {
             let file = s("file").ok_or("`file` must name a section file of the project")?;
@@ -495,14 +501,17 @@ fn project_path(app: &WordApp) -> Result<String, String> {
 fn ask(app: &mut WordApp, pick: Pick) -> Result<Value, String> {
     let req = match pick {
         Pick::OpenProject => FileDialogRequest::Open { purpose: "speccraft".into() },
-        Pick::AddMaster => FileDialogRequest::Open { purpose: "document".into() },
+        // Several at once (W8).
+        Pick::AddMaster => FileDialogRequest::OpenMany { purpose: "document".into() },
         Pick::NewProject => FileDialogRequest::Save { name: "Project.speccraft".into(), dir: None },
         Pick::AttachPdf => FileDialogRequest::Open { purpose: "pdf".into() },
     };
     app.speccraft.pane_open = true;
     app.dialog_pick = None;
+    app.speccraft.picks.clear();
     app.speccraft.waiting = Some(pick);
-    let _ = app.ask_file(req, AfterPick::ForDialog);
+    let after = if matches!(req, FileDialogRequest::OpenMany { .. }) { AfterPick::ForDialogMany } else { AfterPick::ForDialog };
+    let _ = app.ask_file(req, after);
     poll(app);
     Ok(json!({"asked": true}))
 }
@@ -518,7 +527,13 @@ fn poll(app: &mut WordApp) {
     let r = match pick {
         Pick::OpenProject => open_project(app, PathBuf::from(path)),
         Pick::NewProject => new_project(app, PathBuf::from(path), None),
-        Pick::AddMaster => add_section(app, &path),
+        Pick::AddMaster => {
+            let mut all = std::mem::take(&mut app.speccraft.picks);
+            if all.is_empty() {
+                all.push(path);
+            }
+            add_sections(app, &all)
+        }
         Pick::AttachPdf => attach(app, &path),
     };
     if let Err(e) = r {
@@ -587,6 +602,42 @@ fn folder_of_masters(dir: &Path) -> bool {
     let docx = entries.iter().any(|e| !e.dir && ext(e, "docx") && !e.name.starts_with("~$"));
     let project = entries.iter().any(|e| !e.dir && ext(e, "speccraft"));
     docx && !project
+}
+
+/// Add several masters at once (W8): each becomes a section; the first added opens. Masters
+/// that can't be added are named in the status line, the others still go in.
+fn add_sections(app: &mut WordApp, masters: &[String]) -> Result<Value, String> {
+    if masters.len() == 1 {
+        return masters.first().map_or(Ok(Value::Null), |m| add_section(app, m));
+    }
+    let path = project_path(app)?;
+    let mut added: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for m in masters {
+        match app.run("spec.project.addSection", json!({"path": path, "master": m})) {
+            Ok(r) => {
+                if let Some(f) = r.get("added").and_then(Value::as_str) {
+                    added.push(f.to_string());
+                }
+                app.speccraft.info = Some(r);
+            }
+            Err(e) => {
+                let name = Path::new(m).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| m.clone());
+                failed.push(format!("{name}: {e}"));
+            }
+        }
+    }
+    if let Some(first) = added.first().cloned() {
+        open_section(app, &first)?;
+    }
+    let n = added.len().to_string();
+    let msg = if failed.is_empty() {
+        crate::i18n::fmt(tl!("Added {n} sections"), &[("n", &n)])
+    } else {
+        crate::i18n::fmt(tl!("Added {n} sections; not added: {list}"), &[("n", &n), ("list", &failed.join("; "))])
+    };
+    app.status(msg);
+    Ok(json!({"added": added, "failed": failed}))
 }
 
 fn add_section(app: &mut WordApp, master: &str) -> Result<Value, String> {
@@ -1161,6 +1212,31 @@ mod tests {
         assert_eq!(b.speccraft.project.as_deref(), Some(empty.join("P.speccraft").as_path()));
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(&empty).unwrap();
+    }
+
+    /// W8: several masters added at once; one that can't be added doesn't stop the others.
+    #[test]
+    fn several_sections_are_added_at_once() {
+        let dir = scratch("many");
+        let m = dir.join("masters");
+        std::fs::create_dir_all(&m).unwrap();
+        let mut masters = Vec::new();
+        for (n, t, f) in
+            [("09 2900", "GYPSUM BOARD", "092900.docx"), ("07 9200", "JOINT SEALANTS", "079200.docx"), ("08 7100", "DOOR HARDWARE", "087100.docx")]
+        {
+            wordcraft_engine::io::save_path(&m.join(f), &master(n, t)).unwrap();
+            masters.push(m.join(f).to_string_lossy().to_string());
+        }
+        masters.push(m.join("missing.docx").to_string_lossy().to_string());
+        std::fs::create_dir_all(dir.join("project")).unwrap();
+        let mut a = app();
+        a.run("ui.spec.newProject", json!({"path": dir.join("project").join("P.speccraft").to_string_lossy()})).unwrap();
+        let r = a.run("ui.spec.addSection", json!({"masters": masters})).unwrap();
+        assert_eq!(r["added"].as_array().unwrap().len(), 3, "{r}");
+        assert_eq!(r["failed"].as_array().unwrap().len(), 1);
+        assert_eq!(a.speccraft.info.as_ref().unwrap()["sections"].as_array().unwrap().len(), 3);
+        assert_eq!(a.session.path.as_deref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).as_deref(), Some("092900.docx"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
