@@ -200,3 +200,52 @@ fn wordart_reflection_and_outline_none_options() {
     assert_eq!(outline.color, None);
     assert_eq!(outline.width, 1.5);
 }
+
+/// Speccraft W12: a plain line's ends are dragged like a connector's, to points only; a turned
+/// line's ends are where it is drawn.
+#[test]
+fn a_lines_ends_move_to_points_and_never_glue() {
+    let mut s = joined();
+    let line = InlineObject::Shape {
+        kind: ShapeKind::Line,
+        w: 100.0,
+        h: 0.0,
+        fill: None,
+        stroke: None,
+        stroke_width: 1.0,
+        float: Float { wrap: Wrap::InFrontOfText, h_rel: Anchor::Page, v_rel: Anchor::Page, x: 100.0, y: 400.0, ..Default::default() },
+        story: None,
+        freeform: None,
+        effects: Default::default(),
+        extra: ShapeExtra::default(),
+    };
+    let mut p = Paragraph::with_text("L ", CharProps::default());
+    p.insert_object(2, line, &CharProps::default()).unwrap();
+    s.doc.body.push(para_block(p));
+    let pos = Pos::body(1, 2);
+    run(&mut s, "select.range", json!({"anchor": pos, "focus": Pos::body(1, 5)}));
+    let line_ends = |s: &mut Session| {
+        let hit = s.layout().object(&pos, 0).unwrap();
+        let Some(InlineObject::Shape { float, .. }) = s.doc.para_at(&pos).and_then(|p| p.object_at(pos.off)).cloned() else { panic!() };
+        let r = hit.rect;
+        let (a, b) = crate::cmd::connectors::line_ends([r.x, r.y, r.w, r.h], float.flip_h, float.flip_v, float.rot);
+        let round = |p: (f32, f32)| (p.0.round(), p.1.round());
+        (round(a), round(b))
+    };
+    assert_eq!(line_ends(&mut s), ((100.0, 400.0), (200.0, 400.0)));
+    // Its end dragged up and back past its start: the box flips, the line follows the ends.
+    run(&mut s, "shape.connect", json!({"end": {"x": 40.0, "y": 340.0}}));
+    assert_eq!(line_ends(&mut s), ((100.0, 400.0), (40.0, 340.0)));
+    // Near a shape's site it stays where it was dropped: lines don't glue.
+    run(&mut s, "shape.connect", json!({"end": {"x": 300.0, "y": 218.0}}));
+    assert_eq!(line_ends(&mut s), ((100.0, 400.0), (300.0, 218.0)));
+    assert!(matches!(s.doc.para_at(&pos).and_then(|p| p.object_at(pos.off)), Some(InlineObject::Shape { extra, .. }) if extra.end.is_none()));
+    assert!(s.run("shape.connect", &json!({"end": {"path": [0], "off": 5}})).is_err());
+    // A turned line: its ends are where it is drawn, and dragging one unturns it in place.
+    run(&mut s, "shape.connect", json!({"end": {"x": 200.0, "y": 400.0}}));
+    run(&mut s, "arrange.rotate", json!({"degrees": 90}));
+    let (a, b) = line_ends(&mut s);
+    assert_eq!((a, b), ((150.0, 350.0), (150.0, 450.0)), "turned a quarter about its centre");
+    run(&mut s, "shape.connect", json!({"end": {"x": 150.0, "y": 500.0}}));
+    assert_eq!(line_ends(&mut s), ((150.0, 350.0), (150.0, 500.0)));
+}

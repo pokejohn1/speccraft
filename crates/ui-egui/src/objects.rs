@@ -76,13 +76,27 @@ const END_GRAB: f32 = 7.0;
 /// The selected connector's start and end on its page (points), and its layout.
 fn connector_ends(app: &WordApp, layout: &DocLayout) -> Option<(ObjectHit, (f32, f32), (f32, f32))> {
     let (pos, InlineObject::Shape { kind, float, .. }) = selected(app)? else { return None };
-    if !kind.is_connector() {
+    // A plain line too (Speccraft W12): two end handles, not a box to stretch and turn.
+    let line = *kind == wordcraft_doc::para::ShapeKind::Line;
+    if !kind.is_connector() && !(line && pos.story == wordcraft_doc::StoryRef::Body) {
         return None;
     }
-    let (flip_h, flip_v) = (float.flip_h, float.flip_v);
     let o = layout.object(&pos, app.session.page_hint)?;
-    let (a, b) = wordcraft_doc::connector::ends(o.rect.x, o.rect.y, o.rect.w, o.rect.h, flip_h, flip_v);
+    let rot = if line { float.rot } else { 0.0 };
+    let (a, b) = wordcraft_engine::cmd::connectors::line_ends([o.rect.x, o.rect.y, o.rect.w, o.rect.h], float.flip_h, float.flip_v, rot);
     Some((o, a, b))
+}
+
+/// `to` moved so the line from `from` is level, plumb or at 45°, keeping its length.
+fn snap_45(from: (f32, f32), to: (f32, f32)) -> (f32, f32) {
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let len = (dx * dx + dy * dy).sqrt();
+    if !len.is_finite() || len < 0.01 {
+        return to;
+    }
+    let step = std::f32::consts::FRAC_PI_4;
+    let a = (dy.atan2(dx) / step).round() * step;
+    (from.0 + len * a.cos(), from.1 + len * a.sin())
 }
 
 fn point_on_screen(pages: &[Rect], scale: f32, page: usize, (x, y): (f32, f32)) -> Option<Pos2> {
@@ -277,6 +291,11 @@ pub fn pointer(app: &mut WordApp, ui: &Ui, resp: &egui::Response, pages: &[Rect]
         if let Some((which, _)) = d.end {
             if ui.input(|i| i.pointer.primary_down()) {
                 if let Some((_, x, y)) = crate::canvas::page_at(pages, layout, scale, at).filter(|(p, ..)| *p == d.object.page) {
+                    // Shift keeps a line level, plumb or at 45° (Speccraft W12).
+                    let (x, y) = match connector_ends(app, layout) {
+                        Some((_, a, b)) if ui.input(|i| i.modifiers.shift) => snap_45(if which { a } else { b }, (x, y)),
+                        _ => (x, y),
+                    };
                     d.end = Some((which, (x, y)));
                     d.drag.moved = true;
                 }

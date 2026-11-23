@@ -43,12 +43,46 @@ pub(crate) fn gradient_menu(ui: &mut Ui, app: &mut WordApp, fill: Option<&wordcr
     }
 }
 
+/// Shape Outline › Weight: preset weights, each drawn at its thickness with the current one
+/// ticked, and any weight from 0.1 to 72 pt typed in (Speccraft W12).
+fn weight_menu(ui: &mut Ui, app: &mut WordApp, stroke: Option<wordcraft_doc::Rgb>, now: Option<f32>) {
+    let color = stroke.unwrap_or(wordcraft_doc::Rgb::BLACK).hex();
+    let fg = ui.visuals().text_color();
+    for w in [0.25f32, 0.5, 0.75, 1.0, 1.5, 2.25, 3.0, 4.5, 6.0, 8.0, 10.0, 12.0] {
+        let on = now.is_some_and(|n| (n - w).abs() < 0.01);
+        let resp = ui.add(egui::Button::selectable(on, format!("{w} pt")).min_size(vec2(150.0, 0.0)));
+        // A sample of the weight to the right of its name.
+        let r = resp.rect;
+        let y = r.center().y;
+        let x0 = r.left() + 62.0;
+        ui.painter().line_segment([egui::pos2(x0, y), egui::pos2(r.right() - 8.0, y)], egui::Stroke::new((w * 1.33).clamp(0.5, 16.0), fg));
+        if resp.clicked() {
+            let _ = app.run("shape.outline", json!({"color": color, "width": w}));
+            ui.close();
+        }
+    }
+    ui.separator();
+    let id = egui::Id::unique("speccraft_custom_weight");
+    let mut v: f32 = ui.data(|d| d.get_temp(id)).unwrap_or_else(|| now.unwrap_or(1.0));
+    ui.horizontal(|ui| {
+        ui.label(tl!("Weight:"));
+        ui.add(egui::DragValue::new(&mut v).range(0.1..=72.0).speed(0.05).max_decimals(2).suffix(" pt"));
+        if ui.button(tl!("Apply")).clicked() {
+            let _ = app.run("shape.outline", json!({"color": color, "width": v}));
+            ui.close();
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(id, v));
+}
+
 /// Shape Format: fill, outline and effects of the selected shape, and its arrangement.
 pub(super) fn shape_format(app: &mut WordApp, ui: &mut Ui) {
-    let (stroke, glow_size, fill) = match wordcraft_engine::cmd::objects::selected(&app.session) {
-        Some((_, wordcraft_doc::para::InlineObject::Shape { stroke, effects, fill, .. })) => (stroke, effects.glow.map(|g| g.size), fill),
-        Some((_, o)) => (None, None, o.canvas_style().and_then(|c| c.fill.clone())),
-        _ => (None, None, None),
+    let (stroke, glow_size, fill, weight) = match wordcraft_engine::cmd::objects::selected(&app.session) {
+        Some((_, wordcraft_doc::para::InlineObject::Shape { stroke, effects, fill, stroke_width, .. })) => {
+            (stroke, effects.glow.map(|g| g.size), fill, Some(stroke_width))
+        }
+        Some((_, o)) => (None, None, o.canvas_style().and_then(|c| c.fill.clone()), None),
+        _ => (None, None, None, None),
     };
     let theme = app.session.doc.settings.theme_colors.clone();
     group(ui, "Shape Styles", None, app, |ui, app| {
@@ -72,12 +106,7 @@ pub(super) fn shape_format(app: &mut WordApp, ui: &mut Ui) {
                     mi(ui, app, "No Color", "shape.outline", json!({"color": null}));
                     crate::colors::menu(ui, app, &theme, Target::cmd("shape.outline"));
                     ui.separator();
-                    ui.menu_button(tl!("Weight"), |ui| {
-                        let color = stroke.unwrap_or(wordcraft_doc::Rgb::BLACK).hex();
-                        for w in [0.25, 0.5, 0.75, 1.0, 1.5, 2.25, 3.0, 4.5, 6.0] {
-                            mi(ui, app, &format!("{w} pt"), "shape.outline", json!({"color": color, "width": w}));
-                        }
-                    });
+                    ui.menu_button(tl!("Weight"), |ui| weight_menu(ui, app, stroke, weight));
                 },
             );
             menu_button(

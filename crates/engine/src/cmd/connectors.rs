@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 use wordcraft_doc::connector::{ConnEnd, Frame, ends, nearest_site, route, site_point};
-use wordcraft_doc::para::{Anchor, InlineObject, Wrap};
+use wordcraft_doc::para::{Anchor, InlineObject, ShapeKind, Wrap};
 use wordcraft_doc::{Pos, StoryRef};
 
 use crate::{CmdError, CmdResult, CommandSpec, Session, p};
@@ -20,9 +20,27 @@ pub const SNAP: f32 = 12.0;
 /// Largest offset a routed connector gets, points.
 const MAX_OFFSET: f32 = 4000.0;
 
+/// A line's or connector's start and end on the page from its frame `[x, y, w, h]`, flips and
+/// turn (degrees clockwise about the frame's centre; a turned line is drawn turned).
+pub fn line_ends([x, y, w, h]: [f32; 4], flip_h: bool, flip_v: bool, rot: f32) -> ((f32, f32), (f32, f32)) {
+    let (a, b) = ends(x, y, w, h, flip_h, flip_v);
+    let rot = wordcraft_geom::finite(rot);
+    if rot == 0.0 {
+        return (a, b);
+    }
+    let (c, sn) = (rot.to_radians().cos(), rot.to_radians().sin());
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let turn = |(px, py): (f32, f32)| {
+        let (dx, dy) = (px - cx, py - cy);
+        (cx + dx * c - dy * sn, cy + dx * sn + dy * c)
+    };
+    (turn(a), turn(b))
+}
+
 fn has_connector(s: &Session) -> Option<&'static str> {
     match super::objects::selected(s) {
-        Some((_, InlineObject::Shape { kind, .. })) if kind.is_connector() => None,
+        // A plain line's ends move too (W12, Speccraft); they never glue.
+        Some((_, InlineObject::Shape { kind, .. })) if kind.is_connector() || kind == ShapeKind::Line => None,
         _ => Some("select a connector first"),
     }
 }
@@ -190,17 +208,18 @@ fn ensure_id(s: &mut Session, pos: &Pos) -> Result<u32, CmdError> {
 fn connect(s: &mut Session, v: &Value) -> CmdResult {
     let (pos, obj) = super::objects::selected(s).ok_or_else(|| CmdError::Disabled("select a connector first".into()))?;
     let InlineObject::Shape { kind, float, .. } = &obj else { return Err(CmdError::Disabled("select a connector first".into())) };
-    if !kind.is_connector() {
+    let line = *kind == ShapeKind::Line;
+    if !kind.is_connector() && !line {
         return Err(CmdError::Disabled("select a connector first".into()));
     }
-    if pos.story != StoryRef::Body || float.wrap == Wrap::Inline {
+    if pos.story != StoryRef::Body || (float.wrap == Wrap::Inline && !line) {
         return Err(CmdError::Disabled("only floating connectors in the body text can be glued".into()));
     }
-    let (fh, fv) = (float.flip_h, float.flip_v);
+    let (fh, fv, rot) = (float.flip_h, float.flip_v, float.rot);
     let layout = s.layout();
     let hit = layout.object(&pos, s.page_hint).ok_or_else(|| CmdError::Failed("the connector isn't laid out".into()))?;
     let r = hit.rect;
-    let (mut p0, mut p1) = ends(r.x, r.y, r.w, r.h, fh, fv);
+    let (mut p0, mut p1) = line_ends([r.x, r.y, r.w, r.h], fh, fv, if line { rot } else { 0.0 });
     let mut glue: [Option<Option<ConnEnd>>; 2] = [None, None];
     for (i, key) in ["start", "end"].into_iter().enumerate() {
         let Some(e) = v.get(key) else { continue };
@@ -210,6 +229,9 @@ fn connect(s: &mut Session, v: &Value) -> CmdResult {
         }
         let here = if i == 0 { p0 } else { p1 };
         let (target, site) = if e.get("path").is_some() {
+            if line {
+                return Err(CmdError::Params("a line's ends move to points; only connectors glue to shapes".into()));
+            }
             let at = body_pos(e).ok_or_else(|| CmdError::Params(format!("`{key}`: no shape there")))?;
             let th = layout
                 .object(&at, hit.page)
@@ -236,7 +258,7 @@ fn connect(s: &mut Session, v: &Value) -> CmdResult {
             }
             // The nearest site of a shape (not a connector) within reach.
             let mut best: Option<(Pos, u32, f32)> = None;
-            if let Some(pg) = layout.pages.get(page) {
+            if let Some(pg) = layout.pages.get(page).filter(|_| !line) {
                 for it in &pg.items {
                     let wordcraft_layout::Placed::Object { rect, spin, story: StoryRef::Body, path, off, .. } = it else { continue };
                     let at = Pos { story: StoryRef::Body, path: path.clone(), off: *off };
