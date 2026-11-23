@@ -48,7 +48,10 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("spec.printable", "List Printable Paragraphs", LOC, printable_cmd).pure(),
         CommandSpec::new("spec.toggle", "Switch Paragraph On or Off", LOC, toggle)
             .key("Mod+Alt+J")
-            .params(r#"{"id"?: string (default: the paragraph at the caret)}"#),
+            .params(r#"{"id"?: string (default: the paragraphs the selection spans, or the paragraph at the caret)}"#),
+        CommandSpec::new("spec.switch", "Switch Paragraphs On or Off", LOC, switch_cmd).params(
+            r#"{"ids"?: [string] (default: the paragraphs the selection spans, or the paragraph at the caret), "on"?: bool (default: on if any of them is off, otherwise off)}"#,
+        ),
         CommandSpec::new("spec.outline", "Spec Outline", LOC, outline_cmd).pure(),
         CommandSpec::new("spec.exclude", "Leave Out and Ignore Rules", LOC, exclude)
             .params(r#"{"id"?: string (default: the paragraph at the caret), "exclude"?: bool (default: the opposite of now)}"#),
@@ -515,8 +518,79 @@ fn deactivate(s: &mut Session, v: &Value) -> CmdResult {
 /// Switch one paragraph (`id`, or the one at the caret) on or off. A paragraph whose parent is
 /// off is marked refused instead, and comes on when its parent does; toggling a refused
 /// paragraph clears it. Notes can't be switched.
+/// The section paragraphs a selection spans, when it runs over more than one block of the body
+/// (author notes left out).
+pub(crate) fn in_selection(s: &Session, entries: &[Entry]) -> Option<Vec<usize>> {
+    let (a, b) = (&s.sel.anchor, &s.sel.focus);
+    if a.story != StoryRef::Body || b.story != StoryRef::Body {
+        return None;
+    }
+    let (x, y) = (*a.path.0.first()?, *b.path.0.first()?);
+    if x == y {
+        return None;
+    }
+    let (lo, hi) = (x.min(y), x.max(y));
+    let out: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.kind != Kind::Note && e.range.start.path.0.first().is_some_and(|blk| (lo..=hi).contains(blk)))
+        .map(|(i, _)| i)
+        .collect();
+    Some(out)
+}
+
+/// Switch several paragraphs on or off at once (W9). With `on` left out they all go on when any
+/// of them is off, otherwise all off. Going on, they are switched on in document order, so a
+/// parent in the list goes on before its children; one that can't go on (its parent stays off, or
+/// a rule stops it) is reported in `skipped` and the others still go on. Author notes are skipped.
+fn switch_cmd(s: &mut Session, v: &Value) -> CmdResult {
+    let entries = outline(&s.doc);
+    let mut chosen = if v.get("ids").is_some() {
+        targets(v, &entries)?
+    } else if let Some(sel) = in_selection(s, &entries) {
+        sel
+    } else {
+        vec![at_caret(s, &entries).ok_or_else(|| CmdError::Failed("the caret is not in a section paragraph (run spec.import first?)".into()))?]
+    };
+    chosen.retain(|i| entries.get(*i).is_some_and(|e| e.kind != Kind::Note));
+    chosen.sort_unstable();
+    chosen.dedup();
+    if chosen.is_empty() {
+        return Err(CmdError::Failed("no section paragraphs to switch (author notes never print)".into()));
+    }
+    let want = match v.get("on") {
+        None | Some(Value::Null) => chosen.iter().any(|i| entries.get(*i).is_some_and(|e| !e.on)),
+        Some(x) => x.as_bool().ok_or_else(|| CmdError::Params("`on` must be true or false".into()))?,
+    };
+    let ids: Vec<String> = chosen.iter().filter_map(|i| entries.get(*i)).map(|e| e.id.clone()).collect();
+    let before: Vec<bool> = entries.iter().map(|e| e.on).collect();
+    let mut skipped = Vec::new();
+    if want {
+        for id in &ids {
+            let now = outline(&s.doc);
+            if now.iter().any(|e| &e.id == id && e.on) {
+                continue;
+            }
+            if let Err(e) = activate(s, &json!({"id": id})) {
+                skipped.push(json!({"id": id, "why": e.to_string()}));
+            }
+        }
+    } else {
+        deactivate(s, &json!({"ids": ids}))?;
+    }
+    let after = outline(&s.doc);
+    let changed: Vec<&str> = after.iter().zip(&before).filter(|(e, was)| e.on != **was).map(|(e, _)| e.id.as_str()).collect();
+    Ok(json!({"ids": ids, "state": if want { "on" } else { "off" }, "changed": changed, "skipped": skipped}))
+}
+
 fn toggle(s: &mut Session, v: &Value) -> CmdResult {
     let entries = outline(&s.doc);
+    if v.get("id").is_none()
+        && let Some(sel) = in_selection(s, &entries)
+        && sel.len() > 1
+    {
+        return switch_cmd(s, &json!({}));
+    }
     let i = match v.get("id") {
         Some(_) => targets(v, &entries)?.first().copied().ok_or_else(|| CmdError::Params("`id` is required".into()))?,
         None => at_caret(s, &entries).ok_or_else(|| CmdError::Failed("the caret is not in a section paragraph (run spec.import first?)".into()))?,
@@ -751,8 +825,10 @@ mod tests {
     use serde_json::{Value, json};
     use wordcraft_doc::{Block, Document, Paragraph, Table};
 
+    use super::outline;
     use super::{Kind, STATE_PROP, classify};
-    use crate::Session;
+    use crate::{Selection, Session};
+    use wordcraft_doc::{Path, Pos, StoryRef};
 
     /// A small section: (style, text) per paragraph; "" is no style.
     const SECTION: [(&str, &str); 12] = [
@@ -848,6 +924,46 @@ mod tests {
         // The document's own numbering is unchanged.
         let numbered = s.doc.body.iter().filter_map(|b| b.as_para()).filter(|p| p.props.numbering.is_some()).count();
         assert_eq!(numbered, 3);
+    }
+
+    /// W9: several paragraphs switched on or off at once, from a list or a selection.
+    #[test]
+    fn several_paragraphs_switch_on_and_off_at_once() {
+        let mut s = Session::new(doc(&[
+            ("CSILevel0", "Section 099123 Interior Painting"),
+            ("CSILevel1", "PART 1  GENERAL"),
+            ("CSILevel2", "SECTION INCLUDES"),
+            ("CSILevel3", "Surface preparation."),
+            ("CSILevel3", "Scope: Finish interior surfaces exposed to view."),
+            ("CSILevel4", "Prime surfaces to receive wall coverings."),
+            ("CSILevel2", "RELATED REQUIREMENTS"),
+            ("CSILevel3", "Section 099113 - Exterior Painting."),
+            ("CSILevel0", "END OF SECTION  099123"),
+        ]));
+        run(&mut s, "spec.import", json!({}));
+        // Children listed before their parents still go on: document order.
+        let r = run(&mut s, "spec.switch", json!({"ids": ["p0006", "p0005", "p0003", "p0002"]}));
+        assert_eq!((r["state"].clone(), r["skipped"].clone()), (json!("on"), json!([])));
+        assert_eq!(printable(&mut s), ["p0001", "p0002", "p0003", "p0005", "p0006", "p0009"]);
+        // All on: the same list goes off.
+        assert_eq!(run(&mut s, "spec.switch", json!({"ids": ["p0005", "p0006"]}))["state"], "off");
+        assert_eq!(printable(&mut s), ["p0001", "p0002", "p0003", "p0009"]);
+        // One that can't go on (its parent stays off) is skipped; the others go on.
+        let r = run(&mut s, "spec.switch", json!({"ids": ["p0004", "p0008"], "on": true}));
+        assert_eq!(r["skipped"].as_array().unwrap().len(), 1, "{r}");
+        assert_eq!(r["skipped"][0]["id"], "p0008");
+        assert_eq!(printable(&mut s), ["p0001", "p0002", "p0003", "p0004", "p0009"]);
+        // A selection from p0004 to p0006: one is on, two are off, so Switch On / Off puts all on.
+        let block = |id: &str| outline(&s.doc).iter().find(|e| e.id == id).and_then(|e| e.range.start.path.0.first().copied()).unwrap();
+        let (x, y) = (block("p0004"), block("p0006"));
+        s.sel = Selection { anchor: Pos::new(StoryRef::Body, Path::top(x as usize), 1), focus: Pos::new(StoryRef::Body, Path::top(y as usize), 2) };
+        assert_eq!(run(&mut s, "spec.toggle", json!({}))["state"], "on");
+        assert_eq!(printable(&mut s), ["p0001", "p0002", "p0003", "p0004", "p0005", "p0006", "p0009"]);
+        assert_eq!(run(&mut s, "spec.toggle", json!({}))["state"], "off");
+        assert_eq!(printable(&mut s), ["p0001", "p0002", "p0003", "p0009"]);
+        // One undo step brings the whole switch back.
+        s.run("edit.undo", &json!({})).unwrap();
+        assert_eq!(printable(&mut s), ["p0001", "p0002", "p0003", "p0004", "p0005", "p0006", "p0009"]);
     }
 
     /// I3: a master whose levels are CSILevel0–5 styles, with "PART 1" typed into its Parts.

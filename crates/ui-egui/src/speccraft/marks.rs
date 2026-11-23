@@ -331,10 +331,9 @@ pub(crate) fn paint(app: &mut WordApp, ui: &mut Ui, painter: &Painter, rects: &[
     {
         app.status(e);
     }
-    if let Some(id) = clicked
-        && let Err(e) = app.run("spec.toggle", json!({"id": id}))
-    {
-        app.status(e);
+    if let Some(id) = clicked {
+        let shift = ui.input(|i| i.modifiers.shift);
+        super::outline::click_switch(app, &id, shift);
     }
 }
 

@@ -46,6 +46,10 @@ pub struct SpecUi {
     waiting: Option<Pick>,
     /// The Spec Outline pane is open.
     pub outline_open: bool,
+    /// The paragraph last switched with a click (W9): Shift+click another switches the range.
+    pub switch_anchor: Option<String>,
+    /// Paragraphs picked in the Spec Outline with Ctrl+click (W9), switched together.
+    pub picked: Vec<String>,
     /// The page's spec marks are hidden (Specs › Show Marks off).
     pub hide_marks: bool,
     /// The Spec Outline pane's filter, search text and view.
@@ -1322,6 +1326,32 @@ mod tests {
         let mut a = WordApp::new(Session::new(d), Services::default());
         a.run("spec.import", json!({})).unwrap();
         a
+    }
+
+    /// W9: Shift+click switches a range; picked paragraphs switch together; notes are left alone.
+    #[test]
+    fn a_range_and_picked_paragraphs_switch_together() {
+        let mut a = imported_app();
+        let printing = |a: &mut WordApp| -> Vec<String> {
+            let o = outline::outline(a);
+            o["items"].as_array().unwrap().iter().filter(|i| i["state"] == "on").map(|i| i["id"].as_str().unwrap().to_string()).collect()
+        };
+        // Click Part 1, then Shift+click the paragraph under the Article: all three go on.
+        outline::click_switch(&mut a, "p0002", false);
+        outline::click_switch(&mut a, "p0005", true);
+        assert_eq!(printing(&mut a), ["p0001", "p0002", "p0003", "p0005", "p0006"]);
+        assert_eq!(outline::outline(&mut a)["items"][3]["state"], "note", "the note in the range is left alone");
+        // Picked paragraphs switch off together.
+        a.speccraft.picked = vec!["p0003".into(), "p0005".into()];
+        outline::click_switch(&mut a, "p0005", false);
+        assert_eq!(printing(&mut a), ["p0001", "p0002", "p0006"]);
+        // The pane draws with picks.
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            egui::Panel::right("outline_test").default_size(320.0).show(ui, |ui| outline::pane(&mut a, ui));
+        });
+        out.drop_without_applying_deltas();
     }
 
     #[test]

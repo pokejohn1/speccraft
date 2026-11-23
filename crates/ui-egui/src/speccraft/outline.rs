@@ -193,6 +193,27 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     let filter = app.speccraft.filter;
     let mut toggle: Option<String> = None;
     let mut goto: Option<u64> = None;
+    let mut pick: Option<String> = None;
+    let mut switch_picked: Option<bool> = None;
+    // Paragraphs picked with Ctrl+click (W9), switched on or off together.
+    app.speccraft.picked.retain(|id| items.iter().any(|it| it.get("id").and_then(Value::as_str) == Some(id)));
+    if !app.speccraft.picked.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            let n = app.speccraft.picked.len().to_string();
+            ui.label(RichText::new(crate::i18n::fmt(tl!("{n} picked"), &[("n", &n)])).small());
+            if ui.small_button(tl!("Switch On")).clicked() {
+                switch_picked = Some(true);
+            }
+            if ui.small_button(tl!("Switch Off")).clicked() {
+                switch_picked = Some(false);
+            }
+            if ui.small_button(tl!("Clear")).clicked() {
+                app.speccraft.picked.clear();
+            }
+        });
+    } else {
+        ui.label(RichText::new(tl!("Ctrl+click paragraphs to pick several; Shift+click a box to switch a range")).small().color(t.text_disabled));
+    }
     // Room for the details of the paragraph at the caret (its wording and buttons).
     let detail_h = 230.0;
     let list_h = (ui.available_height() - detail_h).max(120.0);
@@ -225,6 +246,7 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
                     if resp.clicked() {
                         toggle = Some(s("id").to_string());
                     }
+                    resp.on_hover_text(tl!("Shift+click: switch every paragraph from the last one clicked"));
                 }
                 let mut text =
                     RichText::new(s("text")).font(if matches!(kind, "title" | "part" | "article" | "end") { semibold(12.0) } else { regular(12.0) });
@@ -242,9 +264,15 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
                     }
                     _ => {}
                 }
-                let resp = ui.add(egui::Button::selectable(here, text).frame_when_inactive(false).truncate());
+                let id = s("id").to_string();
+                let picked = app.speccraft.picked.contains(&id);
+                let resp = ui.add(egui::Button::selectable(here || picked, text).frame_when_inactive(false).truncate());
                 if resp.clicked() {
-                    goto = it.get("block").and_then(Value::as_u64);
+                    if ui.input(|i| i.modifiers.command) {
+                        pick = Some(id);
+                    } else {
+                        goto = it.get("block").and_then(Value::as_u64);
+                    }
                 }
             });
         }
@@ -275,15 +303,89 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     {
         app.status(e);
     }
-    if let Some(id) = toggle {
-        match app.run("spec.toggle", json!({"id": id})) {
-            Ok(r) if r["state"] == "refused" => app.status(tl!("Its parent is off: it will print once the parent is switched on")),
-            Ok(_) => {}
-            Err(e) => app.status(e),
+    if let Some(id) = pick {
+        match app.speccraft.picked.iter().position(|x| *x == id) {
+            Some(i) => {
+                app.speccraft.picked.remove(i);
+            }
+            None => app.speccraft.picked.push(id),
         }
+    }
+    if let Some(on) = switch_picked {
+        let ids = app.speccraft.picked.clone();
+        switch_ids(app, &ids, Some(on));
+    }
+    if let Some(id) = toggle {
+        click_switch(app, &id, ui.input(|i| i.modifiers.shift));
     }
     if let Some(b) = goto {
         go_to(app, b);
+    }
+}
+
+/// A click on a paragraph's on/off mark, in the page or the Spec Outline (W9). With Shift, every
+/// paragraph from the one clicked last to this one is switched together; a picked paragraph
+/// switches all the picked ones; otherwise just this one.
+pub(crate) fn click_switch(app: &mut WordApp, id: &str, shift: bool) {
+    let anchor = app.speccraft.switch_anchor.clone();
+    if shift && let Some(from) = anchor.filter(|a| a != id) {
+        let ids = range_ids(app, &from, id);
+        if !ids.is_empty() {
+            switch_ids(app, &ids, None);
+            return;
+        }
+    }
+    if app.speccraft.picked.iter().any(|p| p == id) && app.speccraft.picked.len() > 1 {
+        let ids = app.speccraft.picked.clone();
+        switch_ids(app, &ids, None);
+        return;
+    }
+    app.speccraft.switch_anchor = Some(id.to_string());
+    match app.run("spec.toggle", json!({"id": id})) {
+        Ok(r) if r["state"] == "refused" => app.status(tl!("Its parent is off: it will print once the parent is switched on")),
+        Ok(_) => {}
+        Err(e) => app.status(e),
+    }
+}
+
+/// The paragraphs from `a` to `b` (either way round) in document order, notes left out.
+fn range_ids(app: &mut WordApp, a: &str, b: &str) -> Vec<String> {
+    let o = app.session.run("spec.outline", &json!({})).unwrap_or(Value::Null);
+    let items: Vec<(String, bool)> = o
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|v| {
+            v.iter()
+                .map(|it| (it.get("id").and_then(Value::as_str).unwrap_or("").to_string(), it.get("state").and_then(Value::as_str) == Some("note")))
+                .collect()
+        })
+        .unwrap_or_default();
+    let (Some(x), Some(y)) = (items.iter().position(|(i, _)| i == a), items.iter().position(|(i, _)| i == b)) else { return Vec::new() };
+    let (lo, hi) = (x.min(y), x.max(y));
+    items.get(lo..=hi).unwrap_or_default().iter().filter(|(_, note)| !note).map(|(i, _)| i.clone()).collect()
+}
+
+/// `spec.switch` for a list of paragraphs, with a status line for any that couldn't go on.
+pub(crate) fn switch_ids(app: &mut WordApp, ids: &[String], on: Option<bool>) {
+    let mut params = json!({"ids": ids});
+    if let Some(on) = on {
+        params["on"] = json!(on);
+    }
+    match app.run("spec.switch", params) {
+        Ok(r) => {
+            let skipped = r.get("skipped").and_then(Value::as_array).map_or(0, Vec::len);
+            let n = r.get("ids").and_then(Value::as_array).map_or(0, Vec::len).saturating_sub(skipped);
+            let msg = if r["state"] == "on" { tl!("Switched on {n} paragraphs") } else { tl!("Switched off {n} paragraphs") };
+            let mut text = crate::i18n::fmt(msg, &[("n", &n.to_string())]);
+            if skipped > 0 {
+                text.push_str(&crate::i18n::fmt(
+                    tl!("; {k} could not go on (their parent is off or a rule stops them)"),
+                    &[("k", &skipped.to_string())],
+                ));
+            }
+            app.status(text);
+        }
+        Err(e) => app.status(e),
     }
 }
 
