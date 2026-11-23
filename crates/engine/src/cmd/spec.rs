@@ -19,6 +19,7 @@ pub mod comments;
 pub mod edits;
 pub mod fields;
 pub mod forms;
+pub mod furniture;
 pub mod library;
 pub mod manual;
 pub mod notes;
@@ -63,6 +64,7 @@ pub fn specs() -> Vec<CommandSpec> {
     v.extend(overview::specs());
     v.extend(paragraphs::specs());
     v.extend(print::specs());
+    v.extend(furniture::specs());
     v.extend(attachments::specs());
     v.extend(review::specs());
     v.extend(comments::specs());

@@ -560,7 +560,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("project")).unwrap();
         let path = dir.join("project").join("Riverside.speccraft");
         let ps = path.to_string_lossy().to_string();
-        run("spec.project.new", json!({"path": ps, "name": "Riverside Library", "number": "2026-14"}));
+        run("spec.project.new", json!({"path": ps, "name": "Riverside Library", "number": "2026-14", "furnitureFile": false}));
         for (n, t, k) in [("09 2900", "GYPSUM BOARD", 3), ("07 9200", "JOINT SEALANTS", 60), ("08 7100", "DOOR HARDWARE", 2)] {
             let m = dir.join(format!("{n}.docx"));
             crate::io::save_path(&m, &master(n, t, k)).unwrap();

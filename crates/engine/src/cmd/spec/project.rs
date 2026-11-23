@@ -50,11 +50,11 @@ pub const BASELINE_PROP: &str = "Speccraft.Baseline";
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("spec.project.new", "New Project", LOC, new_project)
-            .params(r#"{"path": string (the project's .speccraft file), "name": string, "number"?: string, "issue"?: string, "date"?: string}"#)
+            .params(r#"{"path": string (the project's .speccraft file), "name": string, "number"?: string, "issue"?: string, "date"?: string, "location"?: string, "furnitureFile"?: false (no header and footer file)}"#)
             .pure(),
         CommandSpec::new("spec.project.info", "Project Information", LOC, info).params(r#"{"path": string (the project's .speccraft file)}"#).pure(),
         CommandSpec::new("spec.project.set", "Set Project Information", LOC, set)
-            .params(r#"{"path": string (the project's .speccraft file), "name"?: string, "number"?: string, "issue"?: string, "date"?: string, "values"?: {name: string or null (removes)}, "library"?: string or null (the master library folder)}"#)
+            .params(r#"{"path": string (the project's .speccraft file), "name"?: string, "number"?: string, "issue"?: string, "date"?: string, "location"?: string, "values"?: {name: string or null (removes)}, "library"?: string or null (the master library folder)}"#)
             .pure(),
         CommandSpec::new("spec.project.addSection", "Add Section to Project", LOC, add_section)
             .params(r#"{"path": string (the project's .speccraft file), "master"?: string (a master .docx to copy into the project folder), "file"?: string (file name in the project folder: the copy's name, or an existing section file to add as it is)}"#)
@@ -128,8 +128,15 @@ pub struct ProjectFile {
     /// PDFs attached to sections (M23), in the project's Attachments folder.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<super::attachments::Attachment>,
+    /// The project's header and footer file (W10), a Word file in the project folder whose
+    /// header and footer every section copies.
+    #[serde(default, rename = "furnitureFile", skip_serializing_if = "Option::is_none")]
+    pub furniture_file: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+    /// The folder the project file was read from (not stored).
+    #[serde(skip)]
+    pub dir: Option<PathBuf>,
 }
 
 /// A reference standard as the project lists it.
@@ -210,6 +217,9 @@ pub struct Info {
     /// Issue date, as the author writes it.
     #[serde(default)]
     pub date: String,
+    /// Where the project is (W11), e.g. "Riverside, California".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub location: String,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -274,8 +284,9 @@ pub fn load(path: &Path) -> Result<ProjectFile, CmdError> {
     if bytes.len() as u64 > MAX_FILE {
         return Err(CmdError::Failed(format!("{}: project file is larger than 4 MB", path.display())));
     }
-    let f: ProjectFile =
+    let mut f: ProjectFile =
         serde_json::from_slice(&bytes).map_err(|e| CmdError::Failed(format!("{}: not a Speccraft project file ({e})", path.display())))?;
+    f.dir = Some(folder(path));
     if f.format != FORMAT {
         return Err(CmdError::Failed(format!("{}: not a Speccraft project file", path.display())));
     }
@@ -432,6 +443,8 @@ pub fn placeholder_values(f: &ProjectFile) -> BTreeMap<String, String> {
     let builtin = [
         ("project name", &f.project.name),
         ("project number", &f.project.number),
+        ("project id", &f.project.number),
+        ("project location", &f.project.location),
         ("issue", &f.project.issue),
         ("issue date", &f.project.date),
         ("date", &f.project.date),
@@ -571,7 +584,7 @@ fn new_project(_: &mut Session, v: &Value) -> CmdResult {
         return Err(CmdError::Failed(format!("{} already exists", path.display())));
     }
     let name = field(v, "name")?.filter(|n| !n.is_empty()).ok_or_else(|| CmdError::Params("give the project a `name`".into()))?;
-    let f = ProjectFile {
+    let mut f = ProjectFile {
         format: FORMAT.into(),
         version: VERSION,
         project: Info {
@@ -579,10 +592,16 @@ fn new_project(_: &mut Session, v: &Value) -> CmdResult {
             number: field(v, "number")?.unwrap_or_default(),
             issue: field(v, "issue")?.unwrap_or_default(),
             date: field(v, "date")?.unwrap_or_default(),
+            location: field(v, "location")?.unwrap_or_default(),
             extra: Map::new(),
         },
+        dir: Some(folder(&path)),
         ..Default::default()
     };
+    // W10: every new project gets its header and footer file.
+    if v.get("furnitureFile") != Some(&json!(false)) {
+        super::furniture::create(&path, &mut f, false)?;
+    }
     store(&path, &f)?;
     Ok(summary(&path, &f))
 }
@@ -613,7 +632,10 @@ fn summary(path: &Path, f: &ProjectFile) -> Value {
         "number": f.project.number,
         "issue": f.project.issue,
         "date": f.project.date,
+        "location": f.project.location,
         "values": f.values,
+        "furnitureFile": f.furniture_file,
+        "furnitureExists": f.furniture_file.as_ref().is_some_and(|n| dir.join(n).is_file()),
         "sections": sections,
         "rules": f.rules,
         "library": f.library,
@@ -635,9 +657,13 @@ fn info(_: &mut Session, v: &Value) -> CmdResult {
 fn set(_: &mut Session, v: &Value) -> CmdResult {
     let path = project_path(v)?;
     let mut f = load(&path)?;
-    for (k, slot) in
-        [("name", &mut f.project.name), ("number", &mut f.project.number), ("issue", &mut f.project.issue), ("date", &mut f.project.date)]
-    {
+    for (k, slot) in [
+        ("name", &mut f.project.name),
+        ("number", &mut f.project.number),
+        ("issue", &mut f.project.issue),
+        ("date", &mut f.project.date),
+        ("location", &mut f.project.location),
+    ] {
         if let Some(x) = field(v, k)? {
             *slot = x;
         }
@@ -1420,7 +1446,8 @@ mod tests {
         let dir = scratch("publish");
         let project = dir.join("project").join("Riverside.speccraft");
         let path = project.to_string_lossy().to_string();
-        run("spec.project.new", json!({"path": path, "name": "Riverside Library", "number": "2026-14"}));
+        // The sections keep their own header (with placeholders): no header and footer file.
+        run("spec.project.new", json!({"path": path, "name": "Riverside Library", "number": "2026-14", "furnitureFile": false}));
         let m = dir.join("masters").join("gypsum.docx");
         save(&master("09 2900", "GYPSUM BOARD"), &m);
         run("spec.project.addSection", json!({"path": path, "master": m.to_string_lossy()}));

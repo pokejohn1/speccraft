@@ -7,13 +7,6 @@ use serde_json::{Value, json};
 use crate::WordApp;
 use crate::theme::Tokens;
 
-/// The header and footer being edited: (header left, header right, footer left, footer right),
-/// one line per text line.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct FurnitureForm {
-    pub lines: [String; 4],
-}
-
 /// Bring the section on screen into line with the open project (terms, references, units,
 /// Auto-Select New, header and footer). Quiet: a section outside the project is left alone.
 pub(crate) fn sync_open(app: &mut WordApp) {
@@ -41,14 +34,11 @@ pub(crate) fn change(app: &mut WordApp, changes: Value) -> Result<(), String> {
 
 /// The parts of the pane.
 pub(crate) fn show(app: &mut WordApp, ui: &mut Ui, info: &Value) {
+    // W11: the header and footer right under Project Information, which feeds it.
+    super::furniture_editor::show(app, ui, info);
     attachments(app, ui, info);
-    furniture(app, ui, info);
     print_options(app, ui, info);
     standards(app, ui);
-}
-
-fn lines_of(v: &Value, side: &str) -> String {
-    v.get(side).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")).unwrap_or_default()
 }
 
 /// Attached PDFs (M23): which section each goes with; remove one.
@@ -117,56 +107,6 @@ fn attachments(app: &mut WordApp, ui: &mut Ui, info: &Value) {
             }
             Err(e) => app.status(e),
         }
-    }
-}
-
-/// Header and Footer: lines on the left and right, with {fields}.
-fn furniture(app: &mut WordApp, ui: &mut Ui, info: &Value) {
-    let t = Tokens::get(ui.ctx());
-    let header = egui::CollapsingHeader::new(RichText::new(tl!("Header and Footer")).small()).id_salt("spec_furniture").default_open(false);
-    let shown = header.show(ui, |ui| {
-        if app.speccraft.furniture_form.is_none() {
-            let (h, f) = (info.get("header").cloned().unwrap_or(Value::Null), info.get("footer").cloned().unwrap_or(Value::Null));
-            app.speccraft.furniture_form = Some(FurnitureForm { lines: [lines_of(&h, "left"), lines_of(&h, "right"), lines_of(&f, "left"), lines_of(&f, "right")] });
-        }
-        ui.label(
-            RichText::new(tl!("Every section gets these instead of its own. Fields: {Section Name} {Section ID} {Page} {Pages} and any project value, e.g. {Project ID}."))
-                .small()
-                .color(t.text_dim),
-        );
-        let Some(form) = app.speccraft.furniture_form.as_mut() else { return };
-        let [hl, hr, fl, fr] = &mut form.lines;
-        for (label, l, r) in [(tl!("Header"), &mut *hl, &mut *hr), (tl!("Footer"), &mut *fl, &mut *fr)] {
-            ui.label(RichText::new(label).small().strong());
-            ui.horizontal(|ui| {
-                let w = (ui.available_width() / 2.0 - 6.0).max(80.0);
-                ui.add(egui::TextEdit::multiline(l).hint_text(tl!("Left")).desired_rows(2).desired_width(w));
-                ui.add(egui::TextEdit::multiline(r).hint_text(tl!("Right")).desired_rows(2).desired_width(w));
-            });
-        }
-        let mut save = false;
-        let mut sample = false;
-        ui.horizontal(|ui| {
-            save = ui.small_button(tl!("Save")).clicked();
-            sample = ui.small_button(tl!("Use a Sample Footer")).on_hover_text(tl!("Project ID, revision and date on the left; section name, number and pages on the right")).clicked();
-        });
-        if sample {
-            *fl = "Project I.D. {Project ID}\nRev. {Rev No}, {Deliverable Date}".into();
-            *fr = "{Section Name}\n{Section ID} - {Page} of {Pages}".into();
-        }
-        if save {
-            let side = |s: &str| -> Value { json!(s.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect::<Vec<_>>()) };
-            let block = |l: &str, r: &str| if l.trim().is_empty() && r.trim().is_empty() { Value::Null } else { json!({"left": side(l), "right": side(r)}) };
-            let changes = json!({"header": block(hl, hr), "footer": block(fl, fr)});
-            app.speccraft.furniture_form = None;
-            match change(app, changes) {
-                Ok(()) => app.status(tl!("Header and footer saved; sections take them when opened and published")),
-                Err(e) => app.status(e),
-            }
-        }
-    });
-    if shown.body_returned.is_none() {
-        app.speccraft.furniture_form = None;
     }
 }
 

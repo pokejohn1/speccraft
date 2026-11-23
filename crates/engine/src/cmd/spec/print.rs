@@ -184,6 +184,12 @@ fn settings_cmd(_: &mut Session, v: &Value) -> CmdResult {
     if let Some(x) = v.get("footer") {
         f.footer = furniture_param(x)?;
     }
+    // W10: with a header and footer file, the lines go into it (left and right cells).
+    let header = v.get("header").map(|_| f.header.clone().unwrap_or_default());
+    let footer = v.get("footer").map(|_| f.footer.clone().unwrap_or_default());
+    if header.is_some() || footer.is_some() {
+        super::furniture::write_lines(&f, header.as_ref(), footer.as_ref())?;
+    }
     match v.get("autoSelectNew") {
         None => {}
         Some(Value::Null) => f.editing.auto_select_new = None,
@@ -256,6 +262,10 @@ fn keeps_own(f: &ProjectFile, file: Option<&str>) -> bool {
 /// Bring `s`'s document into line with project `f` (see the module docs). `file`: the section's
 /// file name in the project. Returns what changed.
 pub fn sync(s: &mut Session, f: &ProjectFile, file: Option<&str>) -> Result<Value, CmdError> {
+    // The header and footer file itself is not a section: its keywords stay as written.
+    if file.is_some() && file == f.furniture_file.as_deref() {
+        return Ok(json!({"furniture": false, "skipped": "the project's header and footer file"}));
+    }
     let values: serde_json::Map<String, Value> = project::placeholder_values(f).into_iter().map(|(k, v)| (k, json!(v))).collect();
     let terms = super::terms::terms_apply(s, &json!({"values": values}))?;
     let refs = super::terms::refs_apply(s, &json!({"titles": titles(f)}))?;
@@ -268,7 +278,17 @@ pub fn sync(s: &mut Session, f: &ProjectFile, file: Option<&str>) -> Result<Valu
         super::paragraphs::auto_select_cmd(s, &json!({"value": a}))?;
     }
     let mut furniture = false;
-    if (f.header.is_some() || f.footer.is_some()) && !keeps_own(f, file) {
+    let template = if keeps_own(f, file) { None } else { super::furniture::template_for(f)? };
+    if let Some((tpl, bytes)) = template {
+        // W10: the project's header and footer file.
+        let (number, title) = project::number_and_title(&s.doc);
+        let stamp = project::fingerprint(serde_json::to_string(&("file", &bytes, &values, &number, &title)).unwrap_or_default().as_bytes());
+        if s.doc.custom_prop(FURNITURE_PROP) != Some(stamp.as_str()) {
+            super::furniture::put_from_template(&mut s.doc, &tpl, &number, &title, &project::placeholder_values(f));
+            s.doc.set_custom_prop(FURNITURE_PROP, &stamp);
+            furniture = true;
+        }
+    } else if (f.header.is_some() || f.footer.is_some()) && !keeps_own(f, file) {
         let (number, title) = project::number_and_title(&s.doc);
         let stamp = project::fingerprint(serde_json::to_string(&(&f.header, &f.footer, &values, &number, &title)).unwrap_or_default().as_bytes());
         if s.doc.custom_prop(FURNITURE_PROP) != Some(stamp.as_str()) {
@@ -306,15 +326,10 @@ fn pieces(line: &str, number: &str, title: &str, values: &BTreeMap<String, Strin
         let Some(b) = rest.get(a..).and_then(|r| r.find('}')).map(|k| k + a) else { break };
         out.push(Piece::Text(rest.get(..a).unwrap_or("").to_string()));
         let name = rest.get(a + 1..b).unwrap_or("").trim();
-        match name.to_lowercase().as_str() {
-            "page" | "page number" => out.push(Piece::Field("PAGE")),
-            "pages" | "section page count" | "section pages" => out.push(Piece::Field("SECTIONPAGES")),
-            "section id" | "section number" => out.push(Piece::Text(number.to_string())),
-            "section name" | "section title" => out.push(Piece::Text(title_case(title))),
-            low => match values.get(low) {
-                Some(v) => out.push(Piece::Text(v.clone())),
-                None => out.push(Piece::Text(format!("{{{name}}}"))),
-            },
+        match super::furniture::keyword(name, number, title, values) {
+            Some(super::furniture::Piece::Field(f)) => out.push(Piece::Field(f)),
+            Some(super::furniture::Piece::Text(t)) => out.push(Piece::Text(t)),
+            None => out.push(Piece::Text(format!("{{{name}}}"))),
         }
         rest = rest.get(b + 1..).unwrap_or("");
     }
@@ -741,7 +756,7 @@ mod tests {
         assert!(body.contains("Work for Riverside Library"), "{body}");
         assert!(body.contains("Section 07 9200 \"Joint Sealants\""), "{body}");
         let footer = part_text(&sec.doc, sec.doc.last_section.footers.default);
-        assert_eq!(footer, "LANL Project I.D. LANL-0042\tGypsum Board | Rev. 2, December 2026\t09 2900 - 1 of 1", "{footer}");
+        assert_eq!(footer, "LANL Project I.D. LANL-0042\t\tGypsum Board | Rev. 2, December 2026\t\t09 2900 - 1 of 1", "{footer}");
     }
 
     fn file_of(path: &Path, number: &str) -> String {

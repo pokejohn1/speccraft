@@ -20,6 +20,7 @@ use crate::widgets::{big, big_toggle, group};
 pub(crate) mod checks;
 pub(crate) mod choices;
 pub(crate) mod comments_view;
+pub(crate) mod furniture_editor;
 pub(crate) mod library;
 pub(crate) mod manager;
 pub(crate) mod marks;
@@ -86,7 +87,7 @@ pub struct SpecUi {
     pub(crate) choice_fill: String,
     /// The header and footer being edited (M21), the standards report and its titles being
     /// edited (M20).
-    pub(crate) furniture_form: Option<project_settings::FurnitureForm>,
+    pub(crate) furniture_form: Option<furniture_editor::FurnitureForm>,
     pub(crate) standards: Option<Value>,
     /// Print Options opens in the Sections pane next time it draws (Specs › Print Options).
     pub(crate) show_print_options: bool,
@@ -139,6 +140,7 @@ struct InfoForm {
     number: String,
     issue: String,
     date: String,
+    location: String,
     /// Named values: (name, value).
     values: Vec<(String, String)>,
 }
@@ -497,7 +499,7 @@ pub(crate) fn prefs_in(s: &mut SpecUi, v: &Value) {
 }
 
 /// The open project's file, as a string for the engine commands.
-fn project_path(app: &WordApp) -> Result<String, String> {
+pub(crate) fn project_path(app: &WordApp) -> Result<String, String> {
     app.speccraft.project.as_ref().map(|p| p.to_string_lossy().into_owned()).ok_or_else(|| "open a project first".to_string())
 }
 
@@ -846,7 +848,7 @@ fn division(number: &str) -> String {
 }
 
 /// Title case for an all-capitals section title ("GYPSUM BOARD" → "Gypsum Board").
-fn title_case(t: &str) -> String {
+pub(crate) fn title_case(t: &str) -> String {
     if t.chars().any(char::is_lowercase) {
         return t.to_string();
     }
@@ -884,9 +886,13 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
     if !sub.is_empty() {
         ui.label(RichText::new(sub.join(" · ")).small().color(t.text_dim));
     }
-    project_info(app, ui, &info);
-    project_settings::show(app, ui, &info);
-    project_rules::show(app, ui, &info);
+    // The project's settings scroll on their own, so the section list below stays in reach.
+    let max = (ui.available_height() * 0.6).max(160.0);
+    egui::ScrollArea::vertical().id_salt("spec_project_parts").max_height(max).auto_shrink([false, true]).show(ui, |ui| {
+        project_info(app, ui, &info);
+        project_settings::show(app, ui, &info);
+        project_rules::show(app, ui, &info);
+    });
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         if ui.small_button(tl!("Add Section…")).clicked() {
@@ -1058,7 +1064,7 @@ pub(crate) fn pane(app: &mut WordApp, ui: &mut Ui) {
 /// `<Insert Architect Name>` when sections publish.
 fn project_info(app: &mut WordApp, ui: &mut Ui, info: &Value) {
     let t = Tokens::get(ui.ctx());
-    let header = egui::CollapsingHeader::new(RichText::new(tl!("Project Information")).small()).id_salt("spec_project_info").default_open(false);
+    let header = egui::CollapsingHeader::new(RichText::new(tl!("Project Information")).small()).id_salt("spec_project_info").default_open(true);
     let shown = header.show(ui, |ui| {
         if app.speccraft.info_form.is_none() {
             let f = |k: &str| info.get(k).and_then(Value::as_str).unwrap_or("").to_string();
@@ -1067,11 +1073,17 @@ fn project_info(app: &mut WordApp, ui: &mut Ui, info: &Value) {
                 .and_then(Value::as_object)
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect())
                 .unwrap_or_default();
-            app.speccraft.info_form = Some(InfoForm { name: f("name"), number: f("number"), issue: f("issue"), date: f("date"), values });
+            app.speccraft.info_form = Some(InfoForm { name: f("name"), number: f("number"), issue: f("issue"), date: f("date"), location: f("location"), values });
         }
         let Some(form) = app.speccraft.info_form.as_mut() else { return };
         egui::Grid::new("spec_info_grid").num_columns(2).spacing([6.0, 4.0]).show(ui, |ui| {
-            for (label, field) in [("Name", &mut form.name), ("Number", &mut form.number), ("Issue", &mut form.issue), ("Date", &mut form.date)] {
+            for (label, field) in [
+                ("Project Name", &mut form.name),
+                ("Project ID", &mut form.number),
+                ("Location", &mut form.location),
+                ("Issue", &mut form.issue),
+                ("Date", &mut form.date),
+            ] {
                 ui.label(RichText::new(tl!(label)).small());
                 ui.add(egui::TextEdit::singleline(field).desired_width(160.0));
                 ui.end_row();
@@ -1079,7 +1091,7 @@ fn project_info(app: &mut WordApp, ui: &mut Ui, info: &Value) {
         });
         ui.add_space(4.0);
         ui.label(
-            RichText::new(tl!("Global terms: values for placeholders such as <Insert Project ID>. Sections show them in purple and print them."))
+            RichText::new(tl!("Global terms: named values every section can use. Write <Insert Architect Name> in a section or {Architect Name} in the header and footer; sections show them in purple and print the value."))
                 .small()
                 .color(t.text_dim),
         );
@@ -1132,7 +1144,7 @@ fn save_info(app: &mut WordApp, info: &Value, form: &InfoForm) -> Result<Value, 
     }
     let r = app.run(
         "spec.project.set",
-        json!({"path": path, "name": form.name, "number": form.number, "issue": form.issue, "date": form.date, "values": values}),
+        json!({"path": path, "name": form.name, "number": form.number, "issue": form.issue, "date": form.date, "location": form.location, "values": values}),
     )?;
     app.speccraft.info = Some(r.clone());
     app.speccraft.info_form = None;
@@ -1420,6 +1432,7 @@ mod tests {
             number: "2026-14".into(),
             issue: "Issued for Bid".into(),
             date: "December 1, 2026".into(),
+            location: "Riverside, CA".into(),
             values: vec![("Architect Name".into(), "Studio North".into())],
         };
         save_info(&mut a, &info, &form).unwrap();
