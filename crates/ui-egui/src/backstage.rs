@@ -386,6 +386,13 @@ fn matching_templates(query: &str) -> Vec<(&'static str, &'static str)> {
 /// Home: a greeting, Blank plus a short row of templates with a link to New, then Recent.
 fn home_page(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
+    // Speccraft (W7): its logo and name above the greeting.
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::hover());
+        crate::speccraft::draw_logo(ui.painter(), rect);
+        ui.label(egui::RichText::new(crate::speccraft::APP_NAME).font(medium(20.0)).color(t.text));
+    });
+    ui.add_space(6.0);
     let hour = wordcraft_engine::cmd::local_now().3.0;
     heading(
         ui,

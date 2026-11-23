@@ -390,10 +390,11 @@ fn services(file_dialog: file_dialogs::Hook, ctx: &egui::Context) -> Services {
 
 /// Window, Dock and taskbar icon.
 fn app_icon() -> Option<egui::IconData> {
+    // Speccraft's own icon (W7).
     #[cfg(target_os = "macos")]
-    let png: &[u8] = include_bytes!("../../../assets/app-icon/wordcraft-macos-512.png");
+    let png: &[u8] = include_bytes!("../../../assets/app-icon/speccraft-512.png");
     #[cfg(not(target_os = "macos"))]
-    let png: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/ai.storyteller.wordcraft.png");
+    let png: &[u8] = include_bytes!("../../../assets/app-icon/speccraft-256.png");
     eframe::icon_data::from_png_bytes(png).map_err(|e| log::warn!("app icon: {e}")).ok()
 }
 
@@ -555,7 +556,7 @@ fn main() -> eframe::Result {
     }
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("WordCraft")
+            .with_title("Speccraft")
             .with_app_id("ai.storyteller.wordcraft")
             .with_inner_size([1440.0, 920.0])
             .with_min_inner_size([760.0, 480.0])

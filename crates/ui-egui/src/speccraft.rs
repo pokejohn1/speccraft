@@ -426,6 +426,45 @@ pub(crate) fn command(app: &mut WordApp, id: &str, p: &Value) -> Result<Value, S
     }
 }
 
+/// The program's name as the window, title bar and About show it (W7). The app id, settings
+/// folder and file names stay WordCraft's, so preferences and recent files carry over.
+pub const APP_NAME: &str = "Speccraft";
+
+/// The Speccraft logo (W7), drawn in code: the same design as `packaging/speccraft-icon.py`
+/// (a spec page on a deep blue tile, outline lines with sequence-number boxes and a rule bar).
+pub fn draw_logo(painter: &egui::Painter, rect: egui::Rect) {
+    use egui::{Color32, CornerRadius, Pos2, Rect, Stroke, StrokeKind, pos2};
+    let k = rect.width().min(rect.height()) / 1024.0;
+    let at = |x: f32, y: f32| pos2(rect.min.x + x * k, rect.min.y + y * k);
+    let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(at(x0, y0), at(x1, y1));
+    let round = |v: f32| CornerRadius::same((v * k).round().clamp(0.0, 255.0) as u8);
+    painter.rect_filled(rect, round(224.0), Color32::from_rgb(24, 62, 112));
+    let page: Vec<Pos2> = vec![at(232.0, 148.0), at(676.0, 148.0), at(800.0, 272.0), at(800.0, 876.0), at(232.0, 876.0)];
+    painter.add(egui::Shape::convex_polygon(page, Color32::from_rgb(246, 243, 236), Stroke::NONE));
+    painter.add(egui::Shape::convex_polygon(
+        vec![at(676.0, 148.0), at(800.0, 272.0), at(676.0, 272.0)],
+        Color32::from_rgb(205, 214, 228),
+        Stroke::NONE,
+    ));
+    let rows =
+        [(0.0, 380.0, true, false), (48.0, 300.0, true, true), (96.0, 236.0, false, false), (48.0, 300.0, true, false), (96.0, 236.0, true, false)];
+    let mut y = 322.0;
+    for (indent, length, on, bar) in rows {
+        let x = 300.0 + indent;
+        let b = r(x, y - 26.0, x + 56.0, y + 26.0);
+        if on {
+            painter.rect_filled(b, round(10.0), Color32::from_rgb(43, 108, 210));
+        } else {
+            painter.rect_stroke(b, round(10.0), Stroke::new((8.0 * k).max(0.5), Color32::from_rgb(150, 160, 175)), StrokeKind::Inside);
+        }
+        if bar {
+            painter.rect_filled(r(x + 64.0, y - 26.0, x + 74.0, y + 26.0), 0.0, Color32::from_rgb(46, 160, 90));
+        }
+        painter.rect_filled(r(x + 92.0, y - 12.0, x + 92.0 + length, y + 12.0), round(12.0), Color32::from_rgb(40, 48, 62));
+        y += 112.0;
+    }
+}
+
 /// The Speccraft settings kept between runs (M26): Sections pane › Options.
 pub(crate) fn prefs_out(s: &SpecUi) -> Value {
     json!({

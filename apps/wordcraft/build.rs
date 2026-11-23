@@ -7,15 +7,16 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../../assets/app-icon/wordcraft.ico");
+    println!("cargo:rerun-if-changed=../../assets/app-icon/speccraft.ico");
     println!("cargo:rerun-if-env-changed=WORDCRAFT_REQUIRE_WINRES");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
     let mut res = winresource::WindowsResource::new();
-    res.set_icon("../../assets/app-icon/wordcraft.ico")
-        .set("ProductName", "WordCraft")
-        .set("FileDescription", "WordCraft word processor")
+    // Speccraft (W7): its icon and name in Explorer and the taskbar.
+    res.set_icon("../../assets/app-icon/speccraft.ico")
+        .set("ProductName", "Speccraft")
+        .set("FileDescription", "Speccraft specification writer (built on WordCraft)")
         .set("CompanyName", "Learning Machines LLC")
         .set("LegalCopyright", "Copyright (c) the WordCraft authors. MIT OR Apache-2.0.")
         .set("OriginalFilename", "wordcraft.exe")
