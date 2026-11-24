@@ -78,7 +78,7 @@ fn connector_ends(app: &WordApp, layout: &DocLayout) -> Option<(ObjectHit, (f32,
     let (pos, InlineObject::Shape { kind, float, .. }) = selected(app)? else { return None };
     // A plain line too (Speccraft W12): two end handles, not a box to stretch and turn.
     let line = *kind == wordcraft_doc::para::ShapeKind::Line;
-    if !kind.is_connector() && !(line && pos.story == wordcraft_doc::StoryRef::Body) {
+    if !kind.is_connector() && !line {
         return None;
     }
     let o = layout.object(&pos, app.session.page_hint)?;

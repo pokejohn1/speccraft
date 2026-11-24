@@ -212,7 +212,7 @@ fn connect(s: &mut Session, v: &Value) -> CmdResult {
     if !kind.is_connector() && !line {
         return Err(CmdError::Disabled("select a connector first".into()));
     }
-    if pos.story != StoryRef::Body || (float.wrap == Wrap::Inline && !line) {
+    if (pos.story != StoryRef::Body && !line) || (float.wrap == Wrap::Inline && !line) {
         return Err(CmdError::Disabled("only floating connectors in the body text can be glued".into()));
     }
     let (fh, fv, rot) = (float.flip_h, float.flip_v, float.rot);

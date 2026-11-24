@@ -249,3 +249,34 @@ fn a_lines_ends_move_to_points_and_never_glue() {
     run(&mut s, "shape.connect", json!({"end": {"x": 150.0, "y": 500.0}}));
     assert_eq!(line_ends(&mut s), ((150.0, 350.0), (150.0, 500.0)));
 }
+
+/// Speccraft W12: a new line floats in front of the text from the left margin to the right, and
+/// its ends move in a header too.
+#[test]
+fn a_new_line_runs_margin_to_margin_and_its_ends_move_in_a_header() {
+    let mut d = Document::new();
+    let hid = d.add_part(wordcraft_doc::PartKind::Header, vec![para_block(Paragraph::with_text("Project\tNumber", CharProps::default()))]);
+    d.last_section.headers.default = Some(hid);
+    d.body = vec![para_block(Paragraph::with_text("Body", CharProps::default()))];
+    let mut s = Session::new(d);
+    let story = StoryRef::Part(hid);
+    let at = Pos { story, path: wordcraft_doc::Path::top(0), off: 7 };
+    s.sel = crate::Selection::caret(at.clone());
+    run(&mut s, "insert.shape", json!({"kind": "line"}));
+    let sec = s.doc.last_section.clone();
+    let width = sec.page_w - sec.margin_left - sec.margin_right;
+    let Some(InlineObject::Shape { w, float, .. }) = s.doc.para_at(&at).and_then(|p| p.object_at(7)).cloned() else { panic!("no line") };
+    assert_eq!((w, float.wrap), (width, Wrap::InFrontOfText));
+    let text = s.doc.para_at(&at).unwrap().text.clone();
+    assert_eq!(text.replace(wordcraft_doc::para::OBJ, "#"), "Project#\tNumber", "the text stays on its line");
+    let ends = |s: &mut Session| {
+        let hit = s.layout().object(&at, 0).unwrap();
+        let r = hit.rect;
+        let (a, b) = crate::cmd::connectors::line_ends([r.x, r.y, r.w, r.h], false, false, 0.0);
+        ((a.0.round(), a.1.round()), (b.0.round(), b.1.round()))
+    };
+    let ((x0, y0), (x1, _)) = ends(&mut s);
+    assert_eq!((x0, x1), (sec.margin_left.round(), (sec.margin_left + width).round()));
+    run(&mut s, "shape.connect", json!({"end": {"x": x1 - 72.0, "y": y0}}));
+    assert_eq!(ends(&mut s), ((x0, y0), (x1 - 72.0, y0)));
+}

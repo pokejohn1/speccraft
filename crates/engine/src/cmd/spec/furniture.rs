@@ -177,12 +177,22 @@ pub struct Band {
     pub font: Option<String>,
     pub size: Option<f32>,
     pub bold: bool,
+    /// A rule line above the first line and/or below the last (W12).
+    pub rule: Option<super::rule_line::Rule>,
 }
 
 impl Band {
     fn to_json(&self, custom: bool) -> Value {
         let lines: Vec<Value> = self.lines.iter().map(|l| json!({"left": l.left, "center": l.center, "right": l.right})).collect();
-        json!({"lines": lines, "font": self.font, "size": self.size, "bold": self.bold, "custom": custom})
+        let rule = self.rule.unwrap_or(super::rule_line::Rule {
+            above: false,
+            below: false,
+            weight: super::rule_line::DEFAULT_WEIGHT,
+            gap: super::rule_line::DEFAULT_GAP,
+            color: None,
+        });
+        json!({"lines": lines, "font": self.font, "size": self.size, "bold": self.bold, "custom": custom,
+            "line": rule.line(), "lineWeight": rule.weight, "lineGap": rule.gap})
     }
 
     fn from_json(v: &Value) -> Result<Band, CmdError> {
@@ -215,6 +225,17 @@ impl Band {
             }
         };
         out.bold = v.get("bold").and_then(Value::as_bool).unwrap_or(false);
+        if v.get("line").is_some() {
+            let none = super::rule_line::Rule {
+                above: false,
+                below: false,
+                weight: super::rule_line::DEFAULT_WEIGHT,
+                gap: super::rule_line::DEFAULT_GAP,
+                color: None,
+            };
+            let r = none.with(&json!({"line": v.get("line"), "weight": v.get("lineWeight"), "gap": v.get("lineGap")}))?;
+            out.rule = (r.above || r.below).then_some(r);
+        }
         Ok(out)
     }
 }
@@ -230,9 +251,11 @@ fn width_of(doc: &Document) -> f32 {
 fn band_blocks(band: &Band, width: f32, style: &str) -> Vec<Arc<Block>> {
     let chr = CharProps { font: band.font.clone(), size: band.size, bold: band.bold.then_some(true), ..Default::default() };
     let lines = if band.lines.is_empty() { vec![Line::default()] } else { band.lines.clone() };
+    let last = lines.len().saturating_sub(1);
     lines
         .iter()
-        .map(|l| {
+        .enumerate()
+        .map(|(i, l)| {
             let text = format!("{}\t{}\t{}", l.left, l.center, l.right);
             let mut p = Paragraph::with_text(&text, chr.clone()).styled(style);
             p.mark = chr.clone();
@@ -240,6 +263,10 @@ fn band_blocks(band: &Band, width: f32, style: &str) -> Vec<Arc<Block>> {
                 TabStop { pos: width / 2.0, align: TabAlign::Center, leader: TabLeader::None },
                 TabStop { pos: width, align: TabAlign::Right, leader: TabLeader::None },
             ]);
+            if let Some(r) = band.rule {
+                let edge = super::rule_line::Rule { above: r.above && i == 0, below: r.below && i == last, ..r };
+                p.props.borders = Some(edge.apply(Default::default()));
+            }
             p.touch();
             Arc::new(Block::Para(p))
         })
@@ -307,6 +334,7 @@ fn template(f: &ProjectFile) -> Document {
             font: Some("Arial".into()),
             size: Some(9.0),
             bold: false,
+            rule: None,
         })
     };
     let header = lines_of(&f.header).unwrap_or_else(|| Band {
@@ -314,12 +342,14 @@ fn template(f: &ProjectFile) -> Document {
         font: Some("Arial".into()),
         size: Some(9.0),
         bold: false,
+        rule: None,
     });
     let footer = lines_of(&f.footer).unwrap_or_else(|| Band {
         lines: vec![Line { left: "{Section Name}".into(), center: String::new(), right: "{Section ID} - {Page}".into() }],
         font: Some("Arial".into()),
         size: Some(9.0),
         bold: false,
+        rule: None,
     });
     put_bands(&mut doc, Some(&header), Some(&footer));
     doc
@@ -389,6 +419,7 @@ pub fn write_lines(f: &ProjectFile, header: Option<&super::print::Furniture>, fo
         b.font = old.font;
         b.size = old.size;
         b.bold = old.bold;
+        b.rule = old.rule;
         b
     };
     let h = header.map(|x| keep(band(x), PartKind::Header));
@@ -458,6 +489,16 @@ fn read_band(doc: &Document, kind: PartKind) -> (Band, bool) {
             }
         };
         band.lines.push(line);
+    }
+    // Rule lines: above the first paragraph, below the last.
+    let paras: Vec<&Paragraph> = part.blocks.iter().filter_map(|b| b.as_para()).collect();
+    let rule_of = |p: &Paragraph| super::rule_line::Rule::of(&doc.styles.resolve_para(&p.props).borders.unwrap_or_default());
+    if let (Some(first), Some(last)) = (paras.first(), paras.last()) {
+        let (a, b) = (rule_of(first), rule_of(last));
+        if a.above || b.below {
+            let base = if b.below { b } else { a };
+            band.rule = Some(super::rule_line::Rule { above: a.above, below: b.below, ..base });
+        }
     }
     // A last empty line (Word's paragraph mark) is not a line.
     while band.lines.len() > 1 && band.lines.last().is_some_and(|l| *l == Line::default()) {
@@ -768,9 +809,11 @@ mod tests {
             "spec.project.setFurniture",
             json!({"path": project.to_string_lossy(),
                 "header": {"lines": [{"left": "{Project Name}", "center": "{Architect Name}", "right": "{Project Location}"}], "font": "Arial", "size": 9},
-                "footer": {"lines": [{"left": "{Division ID} - {Division Name}", "center": "{Section Name}", "right": "{Section ID} - {Page} of {Pages}"}], "font": "Arial", "size": 8, "bold": true}}),
+                "footer": {"lines": [{"left": "{Division ID} - {Division Name}", "center": "{Section Name}", "right": "{Section ID} - {Page} of {Pages}"}], "font": "Arial", "size": 8, "bold": true, "line": "above", "lineWeight": 1.5, "lineGap": 4}}),
         );
         assert_eq!(got["header"]["font"], "Arial");
+        assert_eq!(got["header"]["line"], "none");
+        assert_eq!((got["footer"]["line"].clone(), got["footer"]["lineWeight"].clone()), (json!("above"), json!(1.5)));
         assert_eq!(got["footer"]["size"], 8.0);
         assert_eq!(got["footer"]["bold"], true);
         assert_eq!(got["terms"][0]["name"], "Architect Name");
@@ -788,6 +831,8 @@ mod tests {
         let set = t.doc.last_section.footers;
         let p = t.doc.parts.get(&set.default.unwrap()).unwrap().blocks[0].as_para().unwrap().clone();
         assert_eq!((p.runs[0].props.font.as_deref(), p.runs[0].props.size, p.runs[0].props.bold), (Some("Arial"), Some(8.0), Some(true)));
+        let top = p.props.borders.and_then(|b| b.top).map(|b| (b.width, b.space));
+        assert_eq!(top, Some((1.5, 4.0)), "the footer's rule line reaches the section");
         // Brought up to date again, nothing changes; the parts don't pile up.
         let parts = t.doc.parts.len();
         assert_eq!(run(&mut t, "spec.project.sync", json!({}))["furniture"], false);

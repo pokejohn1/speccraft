@@ -202,7 +202,12 @@ pub(super) fn icon(s: &mut Session, v: &Value) -> CmdResult {
 pub(super) fn shape(s: &mut Session, v: &Value) -> CmdResult {
     let kind: ShapeKind =
         serde_json::from_value(v.get("kind").cloned().unwrap_or(json!("rectangle"))).map_err(|e| CmdError::Params(e.to_string()))?;
-    let w = p::f32(v, "width").unwrap_or(108.0).clamp(4.0, 2000.0);
+    // A line runs margin to margin unless a width is given (Speccraft W12).
+    let text_width = {
+        let sec = &s.doc.last_section;
+        (sec.page_w - sec.margin_left - sec.margin_right).max(36.0)
+    };
+    let w = p::f32(v, "width").unwrap_or(if kind == ShapeKind::Line { text_width } else { 108.0 }).clamp(4.0, 2000.0);
     let h =
         p::f32(v, "height").unwrap_or(if kind == ShapeKind::Line { 1.0 } else { 72.0 }).clamp(if kind.is_connector() { 0.0 } else { 1.0 }, 2000.0);
     let fill = match p::str(v, "fill") {
@@ -222,6 +227,15 @@ pub(super) fn shape(s: &mut Session, v: &Value) -> CmdResult {
     // Connectors float in front of the text, so they can be glued to floating shapes.
     let float = if kind.is_connector() {
         Float { wrap: Wrap::InFrontOfText, ..Default::default() }
+    } else if kind == ShapeKind::Line {
+        // A line floats in front of the text, anchored to the paragraph it was inserted in, from
+        // the left margin: it never pushes text aside (Speccraft W12).
+        Float {
+            wrap: Wrap::InFrontOfText,
+            h_rel: wordcraft_doc::para::Anchor::Column,
+            v_rel: wordcraft_doc::para::Anchor::Paragraph,
+            ..Default::default()
+        }
     } else {
         Float { wrap: Wrap::Inline, ..Default::default() }
     };

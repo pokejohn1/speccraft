@@ -783,6 +783,69 @@ pub(crate) fn ribbon(app: &mut WordApp, ui: &mut Ui) {
         let auto = wordcraft_engine::cmd::spec::paragraphs::auto_select(&app.session.doc);
         big(ui, app, "check", "Auto-Select\nNew", "ui.spec.autoSelectNew", json!({"value": !auto}), auto);
     });
+    group(ui, "Lines", None, app, |ui, app| {
+        let opts = crate::widgets::MenuButtonOptions::new(
+            "borders",
+            Some("Rule\nLine"),
+            "Rule Line: a line above or below the paragraph, margin to margin",
+            true,
+            "spec.ruleLine",
+        );
+        crate::widgets::menu_button(ui, app, opts, rule_line_menu);
+    });
+}
+
+/// Specs › Lines › Rule Line: where the line goes, its weight and its gap from the text, for the
+/// paragraphs selected (any story: body, header, footer). W12.
+pub(crate) fn rule_line_menu(ui: &mut Ui, app: &mut WordApp) {
+    let now = app.session.run("spec.ruleLineInfo", &json!({})).unwrap_or(Value::Null);
+    let line = now.get("line").and_then(Value::as_str).unwrap_or("none").to_string();
+    let weight = now.get("weight").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+    let gap = now.get("gap").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+    let run = |app: &mut WordApp, v: Value| {
+        if let Err(e) = app.run("spec.ruleLine", v) {
+            app.status(e);
+        }
+    };
+    for (value, label) in [("below", "Line Below"), ("above", "Line Above"), ("both", "Lines Above and Below"), ("none", "No Line")] {
+        if ui.add(egui::Button::selectable(line == value, tl!(label))).clicked() {
+            run(app, json!({"line": value}));
+            ui.close();
+        }
+    }
+    ui.separator();
+    ui.label(RichText::new(tl!("Weight")).small().weak());
+    let fg = ui.visuals().text_color();
+    for w in [0.5f32, 0.75, 1.0, 1.5, 2.25, 3.0, 4.5, 6.0] {
+        let on = line != "none" && (weight - w).abs() < 0.01;
+        let resp = ui.add(egui::Button::selectable(on, crate::i18n::fmt(tl!("{n} pt"), &[("n", &w.to_string())])).min_size(egui::vec2(150.0, 0.0)));
+        let r = resp.rect;
+        ui.painter()
+            .line_segment([egui::pos2(r.left() + 62.0, r.center().y), egui::pos2(r.right() - 8.0, r.center().y)], egui::Stroke::new(w * 1.33, fg));
+        if resp.clicked() {
+            run(app, json!({"weight": w}));
+            ui.close();
+        }
+    }
+    ui.separator();
+    // Any weight and gap, typed.
+    let id = egui::Id::unique("speccraft_rule_line_form");
+    let (mut w, mut g): (f32, f32) = ui.data(|d| d.get_temp(id)).unwrap_or((weight, gap));
+    egui::Grid::new("spec_rule_line_grid").num_columns(2).show(ui, |ui| {
+        ui.label(tl!("Weight:"));
+        ui.add(egui::DragValue::new(&mut w).range(0.25..=12.0).speed(0.05).max_decimals(2).suffix(" pt"));
+        ui.end_row();
+        ui.label(tl!("Gap from text:"));
+        ui.add(egui::DragValue::new(&mut g).range(0.0..=31.0).speed(0.25).max_decimals(1).suffix(" pt"));
+        ui.end_row();
+    });
+    if ui.button(tl!("Apply")).clicked() {
+        run(app, json!({"weight": w, "gap": g}));
+        ui.data_mut(|d| d.remove::<(f32, f32)>(id));
+        ui.close();
+    } else {
+        ui.data_mut(|d| d.insert_temp(id, (w, g)));
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

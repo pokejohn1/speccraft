@@ -30,6 +30,7 @@ pub mod print;
 pub mod project;
 pub mod quality;
 pub mod review;
+pub mod rule_line;
 pub mod rules;
 pub mod sections;
 pub mod terms;
@@ -65,6 +66,7 @@ pub fn specs() -> Vec<CommandSpec> {
     v.extend(paragraphs::specs());
     v.extend(print::specs());
     v.extend(furniture::specs());
+    v.extend(rule_line::specs());
     v.extend(attachments::specs());
     v.extend(review::specs());
     v.extend(comments::specs());

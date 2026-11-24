@@ -50,7 +50,7 @@ fn weight_menu(ui: &mut Ui, app: &mut WordApp, stroke: Option<wordcraft_doc::Rgb
     let fg = ui.visuals().text_color();
     for w in [0.25f32, 0.5, 0.75, 1.0, 1.5, 2.25, 3.0, 4.5, 6.0, 8.0, 10.0, 12.0] {
         let on = now.is_some_and(|n| (n - w).abs() < 0.01);
-        let resp = ui.add(egui::Button::selectable(on, format!("{w} pt")).min_size(vec2(150.0, 0.0)));
+        let resp = ui.add(egui::Button::selectable(on, crate::i18n::fmt(tl!("{n} pt"), &[("n", &w.to_string())])).min_size(vec2(150.0, 0.0)));
         // A sample of the weight to the right of its name.
         let r = resp.rect;
         let y = r.center().y;

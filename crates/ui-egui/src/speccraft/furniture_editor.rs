@@ -20,6 +20,10 @@ pub(crate) struct BandForm {
     size: f32,
     bold: bool,
     custom: bool,
+    /// Rule line: none, above, below or both; weight and gap, points.
+    line: String,
+    line_weight: f32,
+    line_gap: f32,
 }
 
 impl BandForm {
@@ -39,6 +43,9 @@ impl BandForm {
             size: v.get("size").and_then(Value::as_f64).map_or(0.0, |x| x as f32),
             bold: v.get("bold").and_then(Value::as_bool).unwrap_or(false),
             custom: v.get("custom").and_then(Value::as_bool).unwrap_or(false),
+            line: v.get("line").and_then(Value::as_str).unwrap_or("none").to_string(),
+            line_weight: v.get("lineWeight").and_then(Value::as_f64).map_or(1.0, |x| x as f32),
+            line_gap: v.get("lineGap").and_then(Value::as_f64).map_or(1.0, |x| x as f32),
         }
     }
 
@@ -50,6 +57,9 @@ impl BandForm {
             "font": if font.is_empty() { Value::Null } else { json!(font) },
             "size": if self.size >= 4.0 { json!(self.size) } else { Value::Null },
             "bold": self.bold,
+            "line": self.line,
+            "lineWeight": self.line_weight,
+            "lineGap": self.line_gap,
         })
     }
 }
@@ -259,6 +269,28 @@ pub(crate) fn show(app: &mut WordApp, ui: &mut Ui, info: &Value) {
                     band.lines.pop();
                 }
             });
+            // A rule line from margin to margin above or below the band (W12).
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(tl!("Rule line")).small());
+                let name = |v: &str| match v {
+                    "above" => tl!("Above"),
+                    "below" => tl!("Below"),
+                    "both" => tl!("Above and below"),
+                    _ => tl!("None"),
+                };
+                craft_ui::ComboBox::from_id_salt(("spec_hf_line", bi)).width(96.0).selected_text(name(&band.line)).show_ui(ui, |ui| {
+                    for v in ["none", "above", "below", "both"] {
+                        ui.selectable_value(&mut band.line, v.to_string(), name(v));
+                    }
+                });
+                if band.line != "none" {
+                    ui.add(egui::DragValue::new(&mut band.line_weight).range(0.25..=12.0).speed(0.05).max_decimals(2).suffix(" pt"))
+                        .on_hover_text(tl!("Weight"));
+                    ui.label(RichText::new(tl!("gap")).small());
+                    ui.add(egui::DragValue::new(&mut band.line_gap).range(0.0..=31.0).speed(0.25).max_decimals(1).suffix(" pt"))
+                        .on_hover_text(tl!("Gap between the text and the line"));
+                }
+            });
             // What the section on screen will show.
             for [l, c, r] in &band.lines {
                 let p = |s: &str| preview(s, &form.got, &number, &title);
@@ -369,6 +401,21 @@ mod tests {
         out.drop_without_applying_deltas();
         let _ = project;
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The Specs tab's Rule Line menu draws, and a band's rule line goes to the file and back.
+    #[test]
+    fn rule_lines_from_the_menu_and_the_band() {
+        let mut a = crate::WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+        a.run("spec.ruleLine", json!({"line": "both", "weight": 3})).unwrap();
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let out = ctx.run_ui(egui::RawInput::default(), |ui| super::super::rule_line_menu(ui, &mut a));
+        out.drop_without_applying_deltas();
+        let mut band = BandForm::from(&json!({"lines": [{"left": "A"}], "line": "below", "lineWeight": 2.25, "lineGap": 4}));
+        assert_eq!((band.line.as_str(), band.line_weight, band.line_gap), ("below", 2.25, 4.0));
+        band.line = "none".into();
+        assert_eq!(band.to_json()["line"], "none");
     }
 
     #[test]
